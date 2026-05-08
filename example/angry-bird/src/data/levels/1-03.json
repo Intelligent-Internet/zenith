@@ -1,0 +1,43 @@
+{
+  "id": "1-03",
+  "name": "Poached Eggs 1-5",
+  "world": {
+    "width": 1280,
+    "groundY": 648
+  },
+  "slingshot": {
+    "anchor": { "x": 210, "y": 548 },
+    "elevated": false
+  },
+  "birds": ["red", "red", "red", "red"],
+  "blocks": [
+    { "material": "stone", "x": 888, "y": 620, "width": 36, "height": 120, "isStatic": true },
+    { "material": "stone", "x": 1032, "y": 620, "width": 36, "height": 120, "isStatic": true },
+    { "material": "glass", "x": 1096, "y": 594, "width": 24, "height": 132, "angle": -42, "isStatic": true },
+    { "material": "wood", "x": 1016, "y": 564, "width": 92, "height": 24, "isStatic": true },
+
+    { "material": "glass", "x": 1032, "y": 490, "width": 28, "height": 144, "isStatic": true },
+    { "material": "wood", "x": 1016, "y": 442, "width": 82, "height": 24, "isStatic": true },
+    { "material": "wood", "x": 1018, "y": 520, "width": 74, "height": 22, "isStatic": true },
+
+    { "material": "glass", "x": 1032, "y": 356, "width": 28, "height": 150, "isStatic": true },
+    { "material": "wood", "x": 1016, "y": 306, "width": 82, "height": 24, "isStatic": true },
+    { "material": "wood", "x": 1032, "y": 414, "width": 28, "height": 88, "isStatic": true },
+
+    { "material": "glass", "x": 882, "y": 230, "width": 26, "height": 96, "isStatic": true },
+    { "material": "glass", "x": 934, "y": 230, "width": 26, "height": 96, "isStatic": true },
+    { "material": "glass", "x": 986, "y": 230, "width": 26, "height": 96, "isStatic": true },
+    { "material": "glass", "x": 1038, "y": 230, "width": 26, "height": 96, "isStatic": true },
+    { "material": "glass", "x": 960, "y": 192, "width": 184, "height": 22, "isStatic": true }
+  ],
+  "pigs": [
+    { "tier": "small", "x": 960, "y": 520, "isStatic": true },
+    { "tier": "small", "x": 960, "y": 468, "isStatic": true },
+    { "tier": "small", "x": 960, "y": 416, "isStatic": true },
+    { "tier": "small", "x": 960, "y": 364, "isStatic": true }
+  ],
+  "boulders": [
+    { "x": 960, "y": 264, "radius": 34, "hp": 200, "isStatic": true }
+  ],
+  "tntCrates": []
+}

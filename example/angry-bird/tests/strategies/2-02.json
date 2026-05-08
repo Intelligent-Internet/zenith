@@ -1,0 +1,5 @@
+[
+  { "drag-vector": [-119, 0], "ability-tap-time": 50 },
+  { "drag-vector": [-119, 1], "ability-tap-time": 50 },
+  { "drag-vector": [-119, 8], "ability-tap-time": 50 }
+]

@@ -1,0 +1,46 @@
+{
+  "id": "3-04",
+  "name": "Danger Above 6-5",
+  "world": {
+    "width": 1500,
+    "groundY": 648
+  },
+  "slingshot": {
+    "anchor": { "x": 230, "y": 400 },
+    "elevated": true
+  },
+  "birds": ["hal", "hal", "hal"],
+  "platforms": [
+    { "x": 955, "y": 648, "width": 80, "height": 260 }
+  ],
+  "mounds": [
+    { "x": 310, "y": 648, "width": 420, "height": 220 },
+    { "x": 1120, "y": 648, "width": 390, "height": 300 }
+  ],
+  "blocks": [
+    { "material": "wood", "x": 650, "y": 632, "width": 152, "height": 18, "isStatic": true },
+    { "material": "wood", "x": 598, "y": 580, "width": 18, "height": 104, "isStatic": true },
+    { "material": "wood", "x": 650, "y": 580, "width": 18, "height": 104, "isStatic": true },
+    { "material": "wood", "x": 702, "y": 580, "width": 18, "height": 104, "isStatic": true },
+    { "material": "wood", "x": 650, "y": 530, "width": 142, "height": 18, "isStatic": true },
+
+    { "material": "wood", "x": 608, "y": 484, "width": 18, "height": 74, "isStatic": true },
+    { "material": "wood", "x": 650, "y": 484, "width": 18, "height": 74, "isStatic": true },
+    { "material": "wood", "x": 692, "y": 484, "width": 18, "height": 74, "isStatic": true },
+    { "material": "wood", "x": 650, "y": 446, "width": 122, "height": 18, "isStatic": true },
+
+    { "material": "wood", "x": 612, "y": 260, "width": 98, "height": 16, "angle": -48, "isStatic": true },
+    { "material": "wood", "x": 688, "y": 260, "width": 98, "height": 16, "angle": 48, "isStatic": true },
+    { "material": "wood", "x": 650, "y": 224, "width": 72, "height": 16, "isStatic": true },
+
+    { "material": "wood", "x": 570, "y": 610, "width": 96, "height": 16, "angle": 28, "isStatic": true },
+    { "material": "wood", "x": 524, "y": 560, "width": 18, "height": 104, "isStatic": true }
+  ],
+  "pigs": [
+    { "tier": "small", "x": 550, "y": 335, "isStatic": true },
+    { "tier": "small", "x": 590, "y": 335, "isStatic": true },
+    { "tier": "small", "x": 630, "y": 335, "isStatic": true }
+  ],
+  "boulders": [],
+  "tntCrates": []
+}

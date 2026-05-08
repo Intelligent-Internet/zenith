@@ -1,0 +1,49 @@
+{
+  "id": "1-04",
+  "name": "Poached Eggs 1-7",
+  "world": {
+    "width": 1280,
+    "groundY": 648
+  },
+  "slingshot": {
+    "anchor": { "x": 210, "y": 548 },
+    "elevated": false
+  },
+  "birds": ["red", "red", "red", "red"],
+  "platforms": [
+    { "x": 850, "y": 648, "width": 210, "height": 108 },
+    { "x": 1060, "y": 648, "width": 210, "height": 108 }
+  ],
+  "blocks": [
+    { "material": "stone", "x": 790, "y": 594, "width": 34, "height": 108, "isStatic": true },
+    { "material": "stone", "x": 910, "y": 594, "width": 34, "height": 108, "isStatic": true },
+    { "material": "stone", "x": 1010, "y": 594, "width": 34, "height": 108, "isStatic": true },
+    { "material": "stone", "x": 1130, "y": 594, "width": 34, "height": 108, "isStatic": true },
+
+    { "material": "wood", "x": 960, "y": 526, "width": 430, "height": 24, "isStatic": true },
+    { "material": "wood", "x": 960, "y": 408, "width": 430, "height": 24, "isStatic": true },
+
+    { "material": "glass", "x": 832, "y": 474, "width": 32, "height": 92, "isStatic": true },
+    { "material": "glass", "x": 904, "y": 474, "width": 32, "height": 92, "isStatic": true },
+
+    { "material": "glass", "x": 1016, "y": 474, "width": 32, "height": 92, "isStatic": true },
+    { "material": "glass", "x": 1088, "y": 474, "width": 32, "height": 92, "isStatic": true },
+
+    { "material": "glass", "x": 924, "y": 344, "width": 34, "height": 96, "isStatic": true },
+    { "material": "glass", "x": 984, "y": 344, "width": 34, "height": 96, "isStatic": true },
+    { "material": "glass", "x": 1044, "y": 344, "width": 34, "height": 96, "isStatic": true },
+    { "material": "glass", "x": 984, "y": 286, "width": 188, "height": 24, "isStatic": true },
+
+    { "material": "stone", "x": 748, "y": 404, "width": 42, "height": 24, "isStatic": true },
+    { "material": "stone", "x": 1172, "y": 404, "width": 42, "height": 24, "isStatic": true },
+    { "material": "stone", "x": 906, "y": 290, "width": 34, "height": 34, "isStatic": true },
+    { "material": "stone", "x": 1062, "y": 290, "width": 34, "height": 34, "isStatic": true }
+  ],
+  "pigs": [
+    { "tier": "small", "x": 792, "y": 374, "isStatic": true },
+    { "tier": "small", "x": 960, "y": 492, "isStatic": true },
+    { "tier": "small", "x": 1128, "y": 374, "isStatic": true }
+  ],
+  "boulders": [],
+  "tntCrates": []
+}

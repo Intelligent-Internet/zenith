@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+.pnp.*
+.yarn/
+
+# Build output
+dist/
+.vite/
+
+# Test output
+coverage/
+.nyc_output/
+
+# Editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS junk
+Thumbs.db
+# Test artifacts (per-feature screenshots dumped to /tmp by validators)
+*.sh

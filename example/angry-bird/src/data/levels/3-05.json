@@ -1,0 +1,70 @@
+{
+  "id": "3-05",
+  "name": "Danger Above 6-10",
+  "world": {
+    "width": 1920,
+    "groundY": 648
+  },
+  "slingshot": {
+    "anchor": { "x": 230, "y": 410 },
+    "elevated": true
+  },
+  "birds": ["matilda", "bomb", "matilda", "chuck", "blues", "red"],
+  "platforms": [
+    { "x": 230, "y": 648, "width": 300, "height": 150 },
+    { "x": 1080, "y": 648, "width": 430, "height": 120 },
+    { "x": 1490, "y": 648, "width": 500, "height": 120 }
+  ],
+  "blocks": [
+    { "material": "glass", "x": 720, "y": 628, "width": 190, "height": 20, "isStatic": true },
+    { "material": "glass", "x": 648, "y": 584, "width": 22, "height": 88, "isStatic": true },
+    { "material": "glass", "x": 700, "y": 584, "width": 22, "height": 88, "isStatic": true },
+    { "material": "glass", "x": 752, "y": 584, "width": 22, "height": 88, "isStatic": true },
+    { "material": "glass", "x": 804, "y": 584, "width": 22, "height": 88, "isStatic": true },
+    { "material": "glass", "x": 674, "y": 532, "width": 116, "height": 18, "angle": -36, "isStatic": true },
+    { "material": "glass", "x": 766, "y": 532, "width": 116, "height": 18, "angle": 36, "isStatic": true },
+    { "material": "glass", "x": 720, "y": 488, "width": 76, "height": 18, "isStatic": true },
+    { "material": "glass", "x": 720, "y": 564, "width": 48, "height": 46, "isStatic": true },
+    { "material": "wood", "x": 788, "y": 610, "width": 76, "height": 16, "isStatic": true },
+
+    { "material": "wood", "x": 1020, "y": 520, "width": 270, "height": 22, "isStatic": true },
+    { "material": "wood", "x": 1020, "y": 430, "width": 220, "height": 22, "isStatic": true },
+    { "material": "wood", "x": 1020, "y": 360, "width": 88, "height": 20, "isStatic": true },
+    { "material": "wood", "x": 908, "y": 474, "width": 24, "height": 112, "isStatic": true },
+    { "material": "wood", "x": 980, "y": 474, "width": 22, "height": 112, "isStatic": true },
+    { "material": "wood", "x": 1060, "y": 474, "width": 22, "height": 112, "isStatic": true },
+    { "material": "wood", "x": 1132, "y": 474, "width": 24, "height": 112, "isStatic": true },
+    { "material": "wood", "x": 944, "y": 390, "width": 130, "height": 20, "angle": -40, "isStatic": true },
+    { "material": "wood", "x": 1096, "y": 390, "width": 130, "height": 20, "angle": 40, "isStatic": true },
+    { "material": "wood", "x": 974, "y": 340, "width": 88, "height": 18, "angle": -55, "isStatic": true },
+    { "material": "wood", "x": 1066, "y": 340, "width": 88, "height": 18, "angle": 55, "isStatic": true },
+    { "material": "glass", "x": 980, "y": 474, "width": 46, "height": 46, "isStatic": true },
+    { "material": "glass", "x": 1060, "y": 474, "width": 46, "height": 46, "isStatic": true },
+
+    { "material": "stone", "x": 1490, "y": 520, "width": 370, "height": 26, "isStatic": true },
+    { "material": "stone", "x": 1490, "y": 430, "width": 340, "height": 26, "isStatic": true },
+    { "material": "stone", "x": 1490, "y": 340, "width": 310, "height": 26, "isStatic": true },
+    { "material": "stone", "x": 1332, "y": 472, "width": 34, "height": 116, "isStatic": true },
+    { "material": "stone", "x": 1410, "y": 472, "width": 30, "height": 116, "isStatic": true },
+    { "material": "stone", "x": 1490, "y": 472, "width": 30, "height": 116, "isStatic": true },
+    { "material": "stone", "x": 1570, "y": 472, "width": 30, "height": 116, "isStatic": true },
+    { "material": "stone", "x": 1648, "y": 472, "width": 34, "height": 116, "isStatic": true },
+    { "material": "stone", "x": 1364, "y": 382, "width": 34, "height": 96, "isStatic": true },
+    { "material": "stone", "x": 1448, "y": 382, "width": 30, "height": 96, "isStatic": true },
+    { "material": "stone", "x": 1532, "y": 382, "width": 30, "height": 96, "isStatic": true },
+    { "material": "stone", "x": 1616, "y": 382, "width": 34, "height": 96, "isStatic": true },
+    { "material": "stone", "x": 1334, "y": 314, "width": 92, "height": 24, "angle": -22, "isStatic": true },
+    { "material": "stone", "x": 1646, "y": 314, "width": 92, "height": 24, "angle": 22, "isStatic": true },
+    { "material": "stone", "x": 1400, "y": 304, "width": 56, "height": 44, "isStatic": true },
+    { "material": "stone", "x": 1476, "y": 304, "width": 56, "height": 44, "isStatic": true },
+    { "material": "stone", "x": 1552, "y": 304, "width": 56, "height": 44, "isStatic": true },
+    { "material": "stone", "x": 1628, "y": 304, "width": 56, "height": 44, "isStatic": true }
+  ],
+  "pigs": [
+    { "tier": "small", "x": 720, "y": 610, "isStatic": true },
+    { "tier": "small", "x": 970, "y": 500, "isStatic": true },
+    { "tier": "medium", "x": 1500, "y": 500, "isStatic": true }
+  ],
+  "boulders": [],
+  "tntCrates": []
+}

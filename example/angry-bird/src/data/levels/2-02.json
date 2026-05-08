@@ -1,0 +1,55 @@
+{
+  "id": "2-02",
+  "name": "Mighty Hoax 4-2",
+  "world": {
+    "width": 1500,
+    "groundY": 648
+  },
+  "slingshot": {
+    "anchor": { "x": 230, "y": 430 },
+    "elevated": true
+  },
+  "birds": ["blues", "blues", "chuck"],
+  "platforms": [
+    { "x": 230, "y": 648, "width": 330, "height": 96 },
+    { "x": 230, "y": 552, "width": 245, "height": 64 },
+    { "x": 230, "y": 532, "width": 160, "height": 44 },
+
+    { "x": 910, "y": 648, "width": 430, "height": 116 },
+    { "x": 1180, "y": 648, "width": 320, "height": 108 }
+  ],
+  "blocks": [
+    { "material": "wood", "x": 820, "y": 600, "width": 226, "height": 22, "isStatic": true },
+    { "material": "wood", "x": 820, "y": 630, "width": 226, "height": 22, "isStatic": true },
+    { "material": "wood", "x": 720, "y": 616, "width": 24, "height": 64, "isStatic": true },
+    { "material": "wood", "x": 920, "y": 616, "width": 24, "height": 64, "isStatic": true },
+
+    { "material": "wood", "x": 966, "y": 586, "width": 28, "height": 70, "isStatic": true },
+    { "material": "wood", "x": 1154, "y": 586, "width": 28, "height": 70, "isStatic": true },
+    { "material": "wood", "x": 1060, "y": 600, "width": 236, "height": 22, "isStatic": true },
+    { "material": "wood", "x": 1060, "y": 630, "width": 236, "height": 22, "isStatic": true },
+    { "material": "glass", "x": 1008, "y": 590, "width": 52, "height": 34, "isStatic": true },
+    { "material": "glass", "x": 1060, "y": 590, "width": 52, "height": 34, "isStatic": true },
+    { "material": "glass", "x": 1112, "y": 590, "width": 52, "height": 34, "isStatic": true },
+    { "material": "glass", "x": 1034, "y": 556, "width": 52, "height": 34, "isStatic": true },
+    { "material": "glass", "x": 1086, "y": 556, "width": 52, "height": 34, "isStatic": true },
+    { "material": "stone", "x": 976, "y": 410, "width": 34, "height": 74, "isStatic": true },
+    { "material": "stone", "x": 1144, "y": 410, "width": 34, "height": 74, "isStatic": true },
+    { "material": "stone", "x": 1022, "y": 384, "width": 112, "height": 26, "angle": -30, "isStatic": true },
+    { "material": "stone", "x": 1098, "y": 384, "width": 112, "height": 26, "angle": 30, "isStatic": true },
+
+    { "material": "wood", "x": 1190, "y": 600, "width": 196, "height": 22, "isStatic": true },
+    { "material": "wood", "x": 1190, "y": 630, "width": 196, "height": 22, "isStatic": true },
+    { "material": "wood", "x": 1104, "y": 616, "width": 24, "height": 64, "isStatic": true },
+    { "material": "wood", "x": 1276, "y": 616, "width": 24, "height": 64, "isStatic": true }
+  ],
+  "pigs": [
+    { "tier": "small", "x": 804, "y": 476, "isStatic": true },
+    { "tier": "small", "x": 814, "y": 476, "isStatic": true },
+    { "tier": "small", "x": 930, "y": 492, "isStatic": true },
+    { "tier": "small", "x": 940, "y": 492, "isStatic": true },
+    { "tier": "small", "x": 1040, "y": 456, "isStatic": true }
+  ],
+  "boulders": [],
+  "tntCrates": []
+}

@@ -1,0 +1,8 @@
+[
+  { "drag-vector": [-55, -7], "ability-tap-time": 700 },
+  { "drag-vector": [-40, 44], "ability-tap-time": 2800 },
+  { "drag-vector": [-70, 30], "ability-tap-time": 1600 },
+  { "drag-vector": [-119, 9], "ability-tap-time": 50 },
+  { "drag-vector": [-119, 9], "ability-tap-time": 50 },
+  { "drag-vector": [-119, 9], "ability-tap-time": null }
+]

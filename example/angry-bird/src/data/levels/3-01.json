@@ -1,0 +1,46 @@
+{
+  "id": "3-01",
+  "name": "Danger Above 6-1",
+  "world": {
+    "width": 1800,
+    "groundY": 648
+  },
+  "slingshot": {
+    "anchor": { "x": 210, "y": 520 },
+    "elevated": false
+  },
+  "birds": ["red", "red", "red", "chuck"],
+  "platforms": [
+    { "x": 210, "y": 648, "width": 250, "height": 76 }
+  ],
+  "blocks": [
+    { "material": "wood", "x": 1260, "y": 618, "width": 330, "height": 22, "isStatic": true },
+    { "material": "wood", "x": 1260, "y": 544, "width": 270, "height": 22, "isStatic": true },
+    { "material": "wood", "x": 1260, "y": 468, "width": 210, "height": 22, "isStatic": true },
+    { "material": "wood", "x": 1260, "y": 394, "width": 138, "height": 20, "isStatic": true },
+
+    { "material": "wood", "x": 1138, "y": 576, "width": 26, "height": 112, "isStatic": true },
+    { "material": "wood", "x": 1382, "y": 576, "width": 26, "height": 112, "isStatic": true },
+    { "material": "wood", "x": 1176, "y": 500, "width": 24, "height": 104, "isStatic": true },
+    { "material": "wood", "x": 1344, "y": 500, "width": 24, "height": 104, "isStatic": true },
+    { "material": "wood", "x": 1220, "y": 428, "width": 24, "height": 92, "isStatic": true },
+    { "material": "wood", "x": 1300, "y": 428, "width": 24, "height": 92, "isStatic": true },
+
+    { "material": "wood", "x": 1116, "y": 588, "width": 128, "height": 20, "angle": -30, "isStatic": true },
+    { "material": "wood", "x": 1404, "y": 588, "width": 128, "height": 20, "angle": 30, "isStatic": true },
+    { "material": "wood", "x": 1164, "y": 514, "width": 116, "height": 18, "angle": -30, "isStatic": true },
+    { "material": "wood", "x": 1356, "y": 514, "width": 116, "height": 18, "angle": 30, "isStatic": true },
+
+    { "material": "stone", "x": 1260, "y": 322, "width": 138, "height": 28, "isStatic": true },
+    { "material": "stone", "x": 1206, "y": 354, "width": 116, "height": 24, "angle": -28, "isStatic": true },
+    { "material": "stone", "x": 1314, "y": 354, "width": 116, "height": 24, "angle": 28, "isStatic": true }
+  ],
+  "pigs": [
+    { "tier": "small", "x": 952, "y": 610, "isStatic": true },
+    { "tier": "small", "x": 1012, "y": 610, "isStatic": true },
+    { "tier": "small", "x": 1538, "y": 610, "isStatic": true },
+    { "tier": "small", "x": 1130, "y": 430, "isStatic": true }
+  ],
+  "boulders": [],
+  "tntCrates": []
+}

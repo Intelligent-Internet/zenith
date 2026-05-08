@@ -1,0 +1,31 @@
+{
+  "id": "1-02",
+  "name": "Poached Eggs 1-3",
+  "world": {
+    "width": 1800,
+    "groundY": 648
+  },
+  "slingshot": {
+    "anchor": { "x": 210, "y": 548 },
+    "elevated": false
+  },
+  "birds": ["red", "red", "red", "red"],
+  "mounds": [
+    { "x": 760, "y": 648, "width": 320, "height": 128 }
+  ],
+  "boulders": [
+    { "x": 760, "y": 486, "radius": 36, "hp": 200, "isStatic": false }
+  ],
+  "blocks": [
+    { "material": "wood", "x": 1190, "y": 592, "width": 170, "height": 24, "isStatic": true },
+    { "material": "wood", "x": 1128, "y": 624, "width": 24, "height": 68, "isStatic": true },
+    { "material": "wood", "x": 1252, "y": 624, "width": 24, "height": 68, "isStatic": true },
+    { "material": "wood", "x": 1190, "y": 624, "width": 96, "height": 22, "isStatic": true }
+  ],
+  "pigs": [
+    { "tier": "small", "x": 950, "y": 622, "isStatic": false }
+  ],
+  "tntCrates": [
+    { "x": 1190, "y": 558, "width": 52, "height": 52, "isStatic": true }
+  ]
+}

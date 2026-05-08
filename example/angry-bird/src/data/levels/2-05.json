@@ -1,0 +1,45 @@
+{
+  "id": "2-05",
+  "name": "Mighty Hoax 4-10",
+  "world": {
+    "width": 1920,
+    "groundY": 648
+  },
+  "slingshot": {
+    "anchor": { "x": 210, "y": 548 },
+    "elevated": false
+  },
+  "birds": ["red", "blues", "chuck", "red"],
+  "mounds": [
+    { "x": 1190, "y": 648, "width": 1040, "height": 156 }
+  ],
+  "blocks": [
+    { "material": "stone", "x": 780, "y": 608, "width": 52, "height": 42, "isStatic": true },
+    { "material": "stone", "x": 832, "y": 610, "width": 52, "height": 38, "isStatic": true },
+    { "material": "stone", "x": 806, "y": 566, "width": 46, "height": 36, "isStatic": true },
+    { "material": "stone", "x": 858, "y": 568, "width": 42, "height": 32, "angle": -12, "isStatic": true },
+    { "material": "stone", "x": 908, "y": 606, "width": 58, "height": 28, "angle": 18, "isStatic": true },
+
+    { "material": "wood", "x": 982, "y": 594, "width": 150, "height": 20, "angle": -18, "isStatic": true },
+    { "material": "wood", "x": 1058, "y": 548, "width": 132, "height": 18, "angle": 16, "isStatic": true },
+    { "material": "wood", "x": 1138, "y": 590, "width": 160, "height": 20, "angle": 8, "isStatic": true },
+    { "material": "wood", "x": 1160, "y": 502, "width": 120, "height": 18, "angle": 32, "isStatic": true },
+    { "material": "wood", "x": 1224, "y": 535, "width": 146, "height": 20, "angle": -24, "isStatic": true },
+    { "material": "wood", "x": 1292, "y": 500, "width": 120, "height": 18, "angle": -32, "isStatic": true },
+    { "material": "wood", "x": 1320, "y": 580, "width": 162, "height": 20, "angle": 20, "isStatic": true },
+    { "material": "wood", "x": 1398, "y": 546, "width": 136, "height": 18, "angle": -16, "isStatic": true },
+    { "material": "wood", "x": 1508, "y": 590, "width": 142, "height": 18, "angle": -8, "isStatic": true },
+
+    { "material": "stone", "x": 1396, "y": 612, "width": 42, "height": 34, "isStatic": true },
+    { "material": "stone", "x": 1456, "y": 596, "width": 56, "height": 38, "isStatic": true },
+    { "material": "stone", "x": 1510, "y": 606, "width": 50, "height": 42, "isStatic": true },
+    { "material": "stone", "x": 1556, "y": 574, "width": 42, "height": 36, "angle": 12, "isStatic": true },
+    { "material": "stone", "x": 1600, "y": 610, "width": 56, "height": 34, "angle": -14, "isStatic": true }
+  ],
+  "pigs": [
+    { "tier": "small", "x": 906, "y": 512, "isStatic": true },
+    { "tier": "small", "x": 1038, "y": 488, "isStatic": true }
+  ],
+  "boulders": [],
+  "tntCrates": []
+}

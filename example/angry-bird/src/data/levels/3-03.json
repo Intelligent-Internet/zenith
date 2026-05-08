@@ -1,0 +1,44 @@
+{
+  "id": "3-03",
+  "name": "Danger Above 6-3",
+  "world": {
+    "width": 1280,
+    "groundY": 648
+  },
+  "slingshot": {
+    "anchor": { "x": 210, "y": 548 },
+    "elevated": false
+  },
+  "birds": ["chuck", "matilda", "chuck", "chuck"],
+  "platforms": [],
+  "mounds": [],
+  "blocks": [
+    { "material": "wood", "x": 720, "y": 452, "width": 112, "height": 18, "angle": -52, "isStatic": true },
+    { "material": "wood", "x": 800, "y": 452, "width": 112, "height": 18, "angle": 52, "isStatic": true },
+    { "material": "wood", "x": 720, "y": 520, "width": 112, "height": 18, "angle": 52, "isStatic": true },
+    { "material": "wood", "x": 800, "y": 520, "width": 112, "height": 18, "angle": -52, "isStatic": true },
+    { "material": "glass", "x": 760, "y": 470, "width": 44, "height": 44, "isStatic": true },
+    { "material": "glass", "x": 760, "y": 526, "width": 44, "height": 36, "isStatic": true },
+
+    { "material": "wood", "x": 902, "y": 438, "width": 120, "height": 18, "angle": -55, "isStatic": true },
+    { "material": "wood", "x": 978, "y": 438, "width": 120, "height": 18, "angle": 55, "isStatic": true },
+    { "material": "wood", "x": 902, "y": 522, "width": 120, "height": 18, "angle": 55, "isStatic": true },
+    { "material": "wood", "x": 978, "y": 522, "width": 120, "height": 18, "angle": -55, "isStatic": true },
+    { "material": "glass", "x": 902, "y": 502, "width": 42, "height": 42, "isStatic": true },
+    { "material": "glass", "x": 978, "y": 502, "width": 42, "height": 42, "isStatic": true },
+
+    { "material": "wood", "x": 1082, "y": 452, "width": 112, "height": 18, "angle": -50, "isStatic": true },
+    { "material": "wood", "x": 1158, "y": 452, "width": 112, "height": 18, "angle": 50, "isStatic": true },
+    { "material": "wood", "x": 1082, "y": 520, "width": 112, "height": 18, "angle": 50, "isStatic": true },
+    { "material": "wood", "x": 1158, "y": 520, "width": 112, "height": 18, "angle": -50, "isStatic": true },
+    { "material": "glass", "x": 1120, "y": 470, "width": 44, "height": 44, "isStatic": true },
+    { "material": "glass", "x": 1120, "y": 526, "width": 44, "height": 36, "isStatic": true }
+  ],
+  "pigs": [
+    { "tier": "small", "x": 680, "y": 610, "isStatic": true },
+    { "tier": "small", "x": 840, "y": 610, "isStatic": true },
+    { "tier": "small", "x": 1204, "y": 610, "isStatic": true }
+  ],
+  "boulders": [],
+  "tntCrates": []
+}
