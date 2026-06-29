@@ -16,6 +16,22 @@ Our Zenith method keeps the useful parts of repeated review while making the loo
 
 ## Installation
 
+### **Copy and give this to your agent harness:**
+```
+/goal Read the readme at https://github.com/Intelligent-Internet/zenith, detect if using claude code, codex or both, install requirements, install and run Zenith (ie uv run zenith etc like in the readme) and create a new skill called /zenith - when used (along with an additional prompt) it will call the skill: the minimum skill content should be: """First read .claude/orchestrator_prompt.md and treat it as your primary role, then use Zenith to run this mission.""" and afterwards you can add information about Zenith Harness, based on the readme and the technical report (inside the repo), and info on how to start zenith if its not already running. Change the skill to use .codex when using in codex. If both hernesses are available, make sure to add these skill to both of them correctly. When Finished, confirm to me that Zenith is installed, running and ready, explain a bit about Zenith, and why and when to use it.
+```
+This will: 
+* install zenith with requirements
+* start zenith using uv
+* create claude code and codex skills to run & use zenith
+  
+**Then, use /zenith like so - in claude code or codex, type:**
+```
+/zenith <your instruction or query>
+```
+
+### Or install it manually:
+
 Zenith is a small MCP/ACP harness that runs a coding agent as a multi-agent orchestrator. See [`zenith/`](zenith/) for the full package.
 
 **Requirements**
