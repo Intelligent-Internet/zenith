@@ -22,6 +22,7 @@ Zenith is a small MCP/ACP harness that runs a coding agent as a multi-agent orch
 
 - Python 3.11+
 - [`uv`](https://docs.astral.sh/uv/)
+- Node.js 22+ and `npm`
 - Claude Code or Codex
 
 **Install**
@@ -32,21 +33,37 @@ uv sync
 uv run zenith --help
 ```
 
-**Initialize a workspace**
+Install the ACP adapters globally for the agents you want Zenith to run:
 
 ```bash
-# Claude Code
-uv run zenith init --agent claude
+# Claude workers/validators
+npm install -g @agentclientprotocol/claude-agent-acp
+command -v claude-agent-acp
 
-# Or Codex
-uv run zenith init --agent codex
+# Codex workers/validators
+npm install -g @agentclientprotocol/codex-acp
+command -v codex-acp
+```
+
+**Initialize a workspace**
+
+Initialize the project workspace Zenith should operate on. This is your target app/repo, not the Zenith source checkout:
+
+```bash
+# Claude Code, from this Zenith checkout
+uv run zenith init --workspace-dir /path/to/your-app --agent claude
+
+# Or Codex, from this Zenith checkout
+uv run zenith init --workspace-dir /path/to/your-app --agent codex
 ```
 
 **Run a mission**
 
-Start your agent from the initialized workspace:
+Start your agent from the initialized project workspace:
 
 ```bash
+cd /path/to/your-app
+
 claude
 # or
 codex
@@ -55,12 +72,18 @@ codex
 Then ask the agent to read the generated orchestrator prompt:
 
 ```text
-Read .claude/orchestrator_prompt.md and use Zenith to run this mission.
+First read .claude/orchestrator_prompt.md and treat it as your primary role, then use Zenith to run this mission.
 
 <your instruction or query>
 ```
 
-For Codex, point it at `.codex/orchestrator_prompt.md` instead.
+For Codex, use:
+
+```text
+First read .codex/orchestrator_prompt.md and treat it as your primary role, then use Zenith to run this mission.
+
+<your instruction or query>
+```
 
 ## Zenith
 
