@@ -14,6 +14,9 @@ RALPH is the strongest simple baseline because it forces each new session to reo
 
 Our Zenith method keeps the useful parts of repeated review while making the loop adaptive: the orchestrator dynamically allocates workers, testers, reusable skills, replanning, and stopping decisions. In this study, Zenith achieved the best mean rank while using less than half of RALPH's per-task cost.
 
+<img width="1445" height="1088" alt="image" src="https://github.com/user-attachments/assets/200a7337-38a9-4fa2-91e6-60cc6ce07f5b" />
+
+
 ## Installation
 
 Zenith is a small MCP/ACP harness that runs a coding agent as a multi-agent orchestrator. See [`zenith/`](zenith/) for the full package.
