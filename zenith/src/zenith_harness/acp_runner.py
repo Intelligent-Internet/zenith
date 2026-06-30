@@ -95,14 +95,18 @@ def _augment_acp_command(command: str, provider) -> str:
     For codex-acp this is the no-ask, no-sandbox combo — equivalent to
     `codex --dangerously-bypass-approvals-and-sandbox`, which codex-acp
     does not expose as a flag but accepts via `-c` overrides.
+
+    For hermes the command is passed through unchanged.
     """
-    if getattr(provider, "name", None) == "codex":
+    name = getattr(provider, "name", None)
+    if name == "codex":
         return (
             command
             + ' -c sandbox_mode="danger-full-access"'
             + ' -c approval_policy="never"'
             + ' -c model_reasoning_effort="xhigh"'
         )
+    # hermes: no-op
     return command
 
 
@@ -113,12 +117,16 @@ def _acp_subprocess_env(provider) -> dict[str, str]:
     `/usr/bin/env node`, and pass sandbox-disable hints through env. The
     command line also receives `sandbox_mode="danger-full-access"` in
     `_augment_acp_command`.
+
+    For hermes the env is passed through unchanged.
     """
     env = os.environ.copy()
-    if getattr(provider, "name", None) == "codex":
+    name = getattr(provider, "name", None)
+    if name == "codex":
         # Env-var hints — harmless if codex ignores them.
         env["CODEX_SANDBOX"] = "danger-full-access"
         env["CODEX_DISABLE_SANDBOX"] = "1"
+    # hermes: no special env needed
     return env
 
 
