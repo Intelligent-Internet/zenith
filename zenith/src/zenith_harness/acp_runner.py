@@ -788,6 +788,13 @@ class ACPNodeRunner:
             process, workspace_dir, session_update_handler=tracker.handle_session_update
         )
         await client.start()
+        # Drain the reviewer subprocess's stderr continuously. Without this the
+        # OS stderr pipe (~64 KB) fills on a chatty reviewer (it reads the whole
+        # workspace and emits many tool calls), the child blocks on its stderr
+        # write, the ACP/stdout channel stalls, and the reviewer can never call
+        # submit_terminal_review -> spurious "terminal reviewer crashed". run_node
+        # already does this for workers; run_terminal_review omitted it.
+        stderr_task = asyncio.create_task(_drain_stream_chunks(process.stderr))
         try:
             await client.send_request(
                 "initialize",
@@ -817,6 +824,10 @@ class ACPNodeRunner:
             )
             await self._poll_attempt_file(report_path, timeout=2.0)
         finally:
+            try:
+                stderr_task.cancel()
+            except Exception:  # noqa: BLE001
+                pass
             await tracker.flush()
             if process.returncode is None:
                 try:
