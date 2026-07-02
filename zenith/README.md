@@ -73,3 +73,7 @@ First read .codex/orchestrator_prompt.md and treat it as your primary role, then
 ```bash
 uv run pytest
 ```
+
+## License
+
+Apache License 2.0 — see the repository [LICENSE](../LICENSE).

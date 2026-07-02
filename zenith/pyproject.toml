@@ -4,6 +4,29 @@ version = "0.1.0"
 description = "Turn any coding agent into a mission orchestration system via MCP and ACP."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "Intelligent Internet" }]
+keywords = [
+    "ai-agents",
+    "agent-harness",
+    "orchestration",
+    "mcp",
+    "acp",
+    "model-context-protocol",
+    "agent-client-protocol",
+    "claude-code",
+    "codex",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
 dependencies = [
     "fastmcp>=2.0.0",
     "pydantic>=2.0.0",
@@ -12,8 +35,14 @@ dependencies = [
     "click>=8.1.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Intelligent-Internet/zenith"
+Repository = "https://github.com/Intelligent-Internet/zenith"
+Issues = "https://github.com/Intelligent-Internet/zenith/issues"
+"Technical Report" = "https://github.com/Intelligent-Internet/zenith/blob/main/technical_report/Technical_Report.pdf"
+
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
