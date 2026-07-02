@@ -308,7 +308,7 @@ Use decision actions narrowly:
 
 Patch the earliest invalid artifact. Do not create another fix task when the real defect is vague scope, missing inventory coverage, broad contract, stale `mission.md`, wrong task grouping, obsolete skill, weak validator method, missing setup, or bad oracle. If pass/fail criteria changed, old evidence may no longer prove the assertion; plan revalidation.
 
-Be especially careful with `continue`: for failed task or failed gate reports, runtime may treat `continue` as clearing that task. Do not use it to skip failed implementation, missing validator evidence, unresolved gate dissent, merge conflicts, or a terminal-review gap.
+Be especially careful with `continue`: for failed task or failed gate reports, runtime may treat `continue` as clearing that task. Passing gate checkpoints are different: a report headed `Gate checkpoint` already has `cleared: True`, and `continue` only acknowledges the checkpoint. Do not use `continue` to skip failed implementation, missing validator evidence, unresolved gate dissent, merge conflicts, or a terminal-review gap.
 
 When adding new assertion ids in a patch, write matching `contract/<ID>.md` files before calling `decide_attention`. When changing a task body, skill, targets, or dependencies, supersede the task rather than pretending it was edited in place. Do not silently mutate cleared or running work.
 

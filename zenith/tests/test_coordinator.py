@@ -56,7 +56,11 @@ def _task(
     body: str = "body",
 ) -> Task:
     if skill is None and ttype != "gate":
-        skill = "s"
+        skill = (
+            "scrutiny-validator"
+            if ttype == "validate"
+            else "engineering-mission-playbook"
+        )
     return Task(
         id=tid,
         type=ttype,  # type: ignore[arg-type]
@@ -71,7 +75,7 @@ def _simple_tl() -> TaskList:
     return TaskList(
         tasks=[
             _task("w1", "work", ["VAL-001"]),
-            _task("v1", "validate", ["VAL-001"], skill="aud", depends_on=["w1"]),
+            _task("v1", "validate", ["VAL-001"], depends_on=["w1"]),
             _task("g1", "gate", ["VAL-001"], depends_on=["v1"]),
         ]
     )
@@ -81,7 +85,7 @@ def _validate_no_gate_tl() -> TaskList:
     return TaskList(
         tasks=[
             _task("w1", "work", ["VAL-001"]),
-            _task("v1", "validate", ["VAL-001"], skill="aud", depends_on=["w1"]),
+            _task("v1", "validate", ["VAL-001"], depends_on=["w1"]),
         ]
     )
 
@@ -129,11 +133,21 @@ class TestHappyPath:
         assert env.state.state == "attention_needed"
         items = controller.store.load_attention(pid)
         assert items and items[0].kind == "gate_checkpoint"
+        assert items[0].report.startswith("Gate checkpoint from g1")
+        assert "passing gate already cleared" in items[0].report
+        assert (
+            controller.store.load_task_state(pid, "mission-001").status_of("g1")
+            == "cleared"
+        )
 
         env = controller.decide_attention(
             pid, [Decision(item_id=items[0].id, action="continue")]
         )
         assert env.state.state in ("mission_running", "done")
+        assert (
+            controller.store.load_task_state(pid, "mission-001").status_of("g1")
+            == "cleared"
+        )
 
         env = controller.advance_project(pid)
         assert env.state.state == "mission_running"
@@ -181,6 +195,69 @@ class TestHappyPath:
         assert saw_synced_skill
         assert codex_skills.is_dir()
         assert not codex_skills.is_symlink()
+
+    def test_submit_plan_rejects_unknown_skill(
+        self, config: HarnessConfig, workspace: Path
+    ) -> None:
+        controller = ProjectController(
+            config,
+            MockDispatcher(lambda r: WorkHandoff(node_id=r.task.id, done=True, report="")),
+            MockTerminalReviewer(TerminalReviewHandoff(done=True, report="")),
+        )
+        pid = _seed_project(controller, workspace)
+        plan = TaskList(
+            tasks=[
+                _task(
+                    "w1",
+                    "work",
+                    ["VAL-001"],
+                    skill="missing-worker-skill",
+                ),
+                _task("v1", "validate", ["VAL-001"], depends_on=["w1"]),
+                _task("g1", "gate", ["VAL-001"], depends_on=["v1"]),
+            ]
+        )
+
+        with pytest.raises(ToolError) as err:
+            controller.submit_plan(pid, plan)
+
+        assert err.value.code == "invalid_task_list"
+        assert err.value.details is not None
+        assert any(detail.code == "unknown_skill" for detail in err.value.details)
+
+    def test_patch_rejects_unknown_skill(
+        self, config: HarnessConfig, workspace: Path
+    ) -> None:
+        controller = ProjectController(
+            config,
+            MockDispatcher(lambda r: WorkHandoff(node_id=r.task.id, done=True, report="")),
+            MockTerminalReviewer(TerminalReviewHandoff(done=True, report="")),
+        )
+        pid = _seed_project(controller, workspace)
+        controller.submit_plan(pid, _simple_tl())
+        contract_dir = controller.store.ensure_contract_dir(pid, "mission-001")
+        (contract_dir / "NEW-001.md").write_text("# NEW-001\n\nStatement body.\n")
+        patch = TaskListPatch(
+            add_items=["NEW-001"],
+            add=[
+                _task(
+                    "w2",
+                    "work",
+                    ["NEW-001"],
+                    skill="missing-worker-skill",
+                    depends_on=["g1"],
+                ),
+                _task("v2", "validate", ["NEW-001"], depends_on=["w2"]),
+                _task("g2", "gate", ["NEW-001"], depends_on=["v2"]),
+            ],
+        )
+
+        with pytest.raises(ToolError) as err:
+            controller._apply_task_list_patch(pid, "mission-001", patch)
+
+        assert err.value.code == "invalid_patch"
+        assert err.value.details is not None
+        assert any(detail.code == "unknown_skill" for detail in err.value.details)
 
 
 class TestNodeFailedFlow:
@@ -285,8 +362,8 @@ class TestValidatorDissentFailsGate:
         return TaskList(
             tasks=[
                 _task("w1", "work", ["VAL-001"]),
-                _task("v-scrutiny", "validate", ["VAL-001"], skill="aud", depends_on=["w1"]),
-                _task("v-user-surface", "validate", ["VAL-001"], skill="aud", depends_on=["w1"]),
+                _task("v-scrutiny", "validate", ["VAL-001"], skill="scrutiny-validator", depends_on=["w1"]),
+                _task("v-user-surface", "validate", ["VAL-001"], skill="user-testing-validator", depends_on=["w1"]),
                 _task("g1", "gate", ["VAL-001"], depends_on=["v-scrutiny", "v-user-surface"]),
             ]
         )
@@ -537,7 +614,7 @@ class TestDecideAttentionPatchAddItems:
             add_items=["NEW-001"],
             add=[
                 _task("w2", "work", ["NEW-001"], depends_on=["g1"]),
-                _task("v2", "validate", ["NEW-001"], skill="aud", depends_on=["w2"]),
+                _task("v2", "validate", ["NEW-001"], depends_on=["w2"]),
                 _task("g2", "gate", ["NEW-001"], depends_on=["v2"]),
             ],
         )
@@ -589,7 +666,7 @@ class TestEnvelopeProjectId:
 
         submitted = controller.submit_plan(pid, _simple_tl())
         assert submitted.dag is not None
-        assert "    w1  [work:s]  pending  → VAL-001  ← (root)" in submitted.dag
+        assert "    w1  [work:engineering-mission-playbook]  pending  → VAL-001  ← (root)" in submitted.dag
         assert "focus-subgraph" not in submitted.dag
 
         inspected = controller.inspect_project(pid)

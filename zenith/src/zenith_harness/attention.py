@@ -114,11 +114,23 @@ def _gate_report(
     failed_items = failed_items or []
     validator_verdicts = validator_verdicts or {}
     missing_items = missing_items or {}
-    lines = [
-        f"Gate report from {gate.id}",
-        f"cleared: {cleared}",
-        f"targets: {', '.join(gate.targets) if gate.targets else '(none)'}",
-    ]
+    title = (
+        f"Gate checkpoint from {gate.id}"
+        if cleared
+        else f"Gate report from {gate.id}"
+    )
+    lines = [title]
+    if cleared:
+        lines.append(
+            "checkpoint: passing gate already cleared; continue acknowledges "
+            "the checkpoint and does not clear a failed task or gate"
+        )
+    lines.extend(
+        [
+            f"cleared: {cleared}",
+            f"targets: {', '.join(gate.targets) if gate.targets else '(none)'}",
+        ]
+    )
     if reason:
         lines.append(f"reason: {reason}")
     if failed_items:

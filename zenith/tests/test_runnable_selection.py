@@ -36,7 +36,11 @@ def _task(
     depends_on: list[str] | None = None,
 ) -> Task:
     if skill is None and ttype != "gate":
-        skill = "s"
+        skill = (
+            "scrutiny-validator"
+            if ttype == "validate"
+            else "engineering-mission-playbook"
+        )
     return Task(
         id=tid,
         type=ttype,  # type: ignore[arg-type]
@@ -191,8 +195,8 @@ class TestSerialDispatchPicksFirstByListOrder:
         controller.submit_plan(pid, TaskList(tasks=[
             _task("a", "work", ["VAL-A"]),
             _task("b", "work", ["VAL-B"]),
-            _task("va", "validate", ["VAL-A"], skill="aud", depends_on=["a"]),
-            _task("vb", "validate", ["VAL-B"], skill="aud", depends_on=["b"]),
+            _task("va", "validate", ["VAL-A"], depends_on=["a"]),
+            _task("vb", "validate", ["VAL-B"], depends_on=["b"]),
             _task("ga", "gate", ["VAL-A"], depends_on=["va"]),
             _task("gb", "gate", ["VAL-B"], depends_on=["vb"]),
         ]))

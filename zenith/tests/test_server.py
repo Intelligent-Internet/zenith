@@ -178,12 +178,12 @@ async def test_submit_terminal_review_writes_file(tmp_path: Path, monkeypatch) -
 @pytest.mark.asyncio
 async def test_orchestrator_end_to_end_in_process(
     config: HarnessConfig, workspace: Path
-) -> None:
+    ) -> None:
     def responder(req):
-        if req.node.type == "work":
-            return WorkHandoff(node_id=req.node.id, done=True, report="ok")
+        if req.task.type == "work":
+            return WorkHandoff(node_id=req.task.id, done=True, report="ok")
         return ValidateHandoff(
-            node_id=req.node.id,
+            node_id=req.task.id,
             done=True,
             report="audited",
             items=[ValidationItem(item_id="VAL-001", passed=True)],
@@ -206,8 +206,8 @@ async def test_orchestrator_end_to_end_in_process(
     (contract_dir / "VAL-001.md").write_text("# VAL-001\n")
     task_list_dict = {
         "tasks": [
-            {"id": "w1", "type": "work", "body": "do", "targets": ["VAL-001"], "skill": "s", "depends_on": []},
-            {"id": "v1", "type": "validate", "body": "audit", "targets": ["VAL-001"], "skill": "aud", "depends_on": ["w1"]},
+            {"id": "w1", "type": "work", "body": "do", "targets": ["VAL-001"], "skill": "engineering-mission-playbook", "depends_on": []},
+            {"id": "v1", "type": "validate", "body": "audit", "targets": ["VAL-001"], "skill": "scrutiny-validator", "depends_on": ["w1"]},
             {"id": "g1", "type": "gate", "body": "", "targets": ["VAL-001"], "skill": None, "depends_on": ["v1"]},
         ],
     }
@@ -281,8 +281,8 @@ async def test_advance_project_tolerates_asyncio_run_dispatcher(
     (contract_dir / "VAL-001.md").write_text("# VAL-001\n")
     task_list_dict = {
         "tasks": [
-            {"id": "w1", "type": "work", "body": "do", "targets": ["VAL-001"], "skill": "s", "depends_on": []},
-            {"id": "v1", "type": "validate", "body": "audit", "targets": ["VAL-001"], "skill": "aud", "depends_on": ["w1"]},
+            {"id": "w1", "type": "work", "body": "do", "targets": ["VAL-001"], "skill": "engineering-mission-playbook", "depends_on": []},
+            {"id": "v1", "type": "validate", "body": "audit", "targets": ["VAL-001"], "skill": "scrutiny-validator", "depends_on": ["w1"]},
             {"id": "g1", "type": "gate", "body": "", "targets": ["VAL-001"], "skill": None, "depends_on": ["v1"]},
         ],
     }
