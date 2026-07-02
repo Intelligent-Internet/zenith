@@ -11,7 +11,9 @@ The coordinator is constructed per-invocation; it has no in-memory state.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
+from .assets import AssetLoader
 from .config import HarnessConfig
 from .coordinator import MissionCoordinator
 from .dispatcher import NodeDispatcher, TerminalReviewer
@@ -27,7 +29,6 @@ from .models import (
     MissionPlanning,
     MissionRunning,
     ProjectState,
-    Task,
     TaskList,
     TaskListPatch,
     TaskStateFile,
@@ -36,6 +37,7 @@ from .storage import ProjectStore
 from .task_list_patch import apply_patch
 from .task_validation import (
     ValidationError,
+    check_skill_names,
     parse_contract_dir,
     validate_task_list_submission,
 )
@@ -101,6 +103,8 @@ class ProjectController:
                 details=parse_errs,
             )
         errs = validate_task_list_submission(ids, task_list)
+        if not errs:
+            errs = self._validate_task_skills(project_id, task_list)
         if errs:
             raise ToolError(
                 "invalid_task_list", "task list validation failed", details=errs
@@ -357,6 +361,11 @@ class ProjectController:
             raise ToolError(
                 "invalid_patch", "patch validation failed", details=errs
             )
+        skill_errs = self._validate_task_skills(project_id, patched_tl)
+        if skill_errs:
+            raise ToolError(
+                "invalid_patch", "patch validation failed", details=skill_errs
+            )
         self.store.save_task_list(project_id, mid, patched_tl)
         self.store.save_task_state(project_id, mid, patched_state)
         cs = self.store.load_contract_state(project_id, mid)
@@ -405,6 +414,21 @@ class ProjectController:
         if state is None:
             raise ToolError("not_found", f"project {project_id!r} has no state")
         return state
+
+    def _validate_task_skills(
+        self,
+        project_id: str,
+        task_list: TaskList,
+    ) -> list[ValidationError]:
+        return check_skill_names(task_list, self._available_skill_names(project_id))
+
+    def _available_skill_names(self, project_id: str) -> set[str]:
+        names: set[str] = set()
+        for skill in AssetLoader(self.config).list_skills(project_id):
+            if skill.name:
+                names.add(skill.name)
+            names.add(Path(skill.path).parent.name)
+        return names
 
 
 def _make_pending():

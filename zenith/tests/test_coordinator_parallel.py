@@ -40,7 +40,13 @@ def config(harness_home: Path) -> HarnessConfig:
 
 
 def _task(tid: str, target: str) -> Task:
-    return Task(id=tid, type="work", body="b", targets=[target], skill="s")
+    return Task(
+        id=tid,
+        type="work",
+        body="b",
+        targets=[target],
+        skill="engineering-mission-playbook",
+    )
 
 
 def _write_contract(store: ProjectStore, pid: str, mission_id: str, assertion: str) -> None:
@@ -114,7 +120,7 @@ def test_auto_merge_false_still_uses_current_workspace(
                     type="work",
                     body="b",
                     targets=["EXP-A"],
-                    skill="s",
+                    skill="engineering-mission-playbook",
                     auto_merge=False,
                 )
             ]
@@ -175,7 +181,7 @@ def test_serial_mode_batches_ready_gate_validators_before_more_work(
                     type="work",
                     body="later work",
                     targets=[],
-                    skill="s",
+                    skill="engineering-mission-playbook",
                     depends_on=["w1"],
                 ),
                 Task(
@@ -183,7 +189,7 @@ def test_serial_mode_batches_ready_gate_validators_before_more_work(
                     type="validate",
                     body="audit implementation",
                     targets=["VAL-A"],
-                    skill="aud",
+                    skill="scrutiny-validator",
                     depends_on=["w1"],
                 ),
                 Task(
@@ -191,7 +197,7 @@ def test_serial_mode_batches_ready_gate_validators_before_more_work(
                     type="validate",
                     body="audit user surface",
                     targets=["VAL-A"],
-                    skill="aud",
+                    skill="user-testing-validator",
                     depends_on=["w1"],
                 ),
                 Task(
@@ -259,7 +265,7 @@ def test_serial_mode_prioritizes_remaining_gate_validator_before_more_work(
                     type="work",
                     body="later work",
                     targets=[],
-                    skill="s",
+                    skill="engineering-mission-playbook",
                     depends_on=["w1"],
                 ),
                 Task(
@@ -267,7 +273,7 @@ def test_serial_mode_prioritizes_remaining_gate_validator_before_more_work(
                     type="validate",
                     body="already audited",
                     targets=["VAL-A"],
-                    skill="aud",
+                    skill="scrutiny-validator",
                     depends_on=["w1"],
                 ),
                 Task(
@@ -275,7 +281,7 @@ def test_serial_mode_prioritizes_remaining_gate_validator_before_more_work(
                     type="validate",
                     body="remaining audit",
                     targets=["VAL-A"],
-                    skill="aud",
+                    skill="user-testing-validator",
                     depends_on=["w1"],
                 ),
                 Task(

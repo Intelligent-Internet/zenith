@@ -49,7 +49,11 @@ def config(harness_home: Path) -> HarnessConfig:
 def _task(tid: str, ttype: str, targets: list[str], skill: str | None = None,
           depends_on: list[str] | None = None) -> Task:
     if skill is None and ttype != "gate":
-        skill = "s"
+        skill = (
+            "scrutiny-validator"
+            if ttype == "validate"
+            else "engineering-mission-playbook"
+        )
     return Task(
         id=tid,
         type=ttype,  # type: ignore[arg-type]
@@ -63,7 +67,7 @@ def _task(tid: str, ttype: str, targets: list[str], skill: str | None = None,
 def _simple_tl() -> TaskList:
     return TaskList(tasks=[
         _task("w1", "work", ["VAL-001"]),
-        _task("v1", "validate", ["VAL-001"], skill="aud", depends_on=["w1"]),
+        _task("v1", "validate", ["VAL-001"], depends_on=["w1"]),
         _task("g1", "gate", ["VAL-001"], depends_on=["v1"]),
     ])
 

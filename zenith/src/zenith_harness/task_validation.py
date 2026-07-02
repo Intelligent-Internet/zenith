@@ -118,6 +118,31 @@ def check_task_shape(tl: TaskList) -> list[ValidationError]:
     return errors
 
 
+def check_skill_names(
+    tl: TaskList,
+    available_skills: set[str] | list[str] | tuple[str, ...],
+) -> list[ValidationError]:
+    """Non-gate task skills must resolve to an available skill name."""
+    available = set(available_skills)
+    errors: list[ValidationError] = []
+    for task in tl.tasks:
+        if task.type == "gate" or not task.skill:
+            continue
+        if task.skill not in available:
+            if available:
+                detail = (
+                    f"{task.id} references unknown skill {task.skill!r}; "
+                    f"available: {', '.join(sorted(available))}"
+                )
+            else:
+                detail = (
+                    f"{task.id} references unknown skill {task.skill!r}; "
+                    "no skills are available"
+                )
+            errors.append(ValidationError("unknown_skill", detail))
+    return errors
+
+
 def check_deps_resolve(tl: TaskList) -> list[ValidationError]:
     """All `depends_on` ids reference declared tasks; no self-loop."""
     errors: list[ValidationError] = []
@@ -295,6 +320,7 @@ __all__ = [
     "parse_contract_dir",
     "check_task_ids",
     "check_task_shape",
+    "check_skill_names",
     "check_deps_resolve",
     "check_acyclic",
     "check_coverage",

@@ -141,14 +141,13 @@ def _build_task_list() -> TaskList:
     ])
 
 
-def _write_contract(workspace: Path, mission_id: str) -> None:
-    d = workspace / ".zenith" / "missions" / mission_id / "contract"
-    d.mkdir(parents=True, exist_ok=True)
+def _write_contract(store: ProjectStore, pid: str, mission_id: str) -> None:
+    d = store.ensure_contract_dir(pid, mission_id)
     (d / "VAL-HELLO-001.md").write_text(CONTRACT_BODY)
 
 
-def _write_worker_skill(workspace: Path) -> None:
-    d = workspace / ".zenith" / "skills" / "hello-file-worker"
+def _write_worker_skill(store: ProjectStore, pid: str) -> None:
+    d = store.zenith_dir(pid) / "skills" / "hello-file-worker"
     d.mkdir(parents=True, exist_ok=True)
     (d / "SKILL.md").write_text(
         """---
@@ -253,12 +252,12 @@ def test_smoke_hello_mission(
 
     # 1) start_project
     start_env = controller.start_project("smoke test brief", str(workspace))
-    pid = ProjectStore(config).list_projects()[0].id
+    pid = controller.store.list_projects()[0].id
     assert start_env.state.state == "mission_planning"
 
     # 2) contract + submit_plan
-    _write_contract(workspace, "mission-001")
-    _write_worker_skill(workspace)
+    _write_contract(controller.store, pid, "mission-001")
+    _write_worker_skill(controller.store, pid)
     plan_env = controller.submit_plan(pid, _build_task_list())
     assert plan_env.state.state == "mission_running"
 
@@ -266,10 +265,12 @@ def test_smoke_hello_mission(
     deadline = time.monotonic() + _TIMEOUT_S
     state_history: list[str] = []
 
-    # Drive: w1 → v1 → g1 → terminal review.
+    # Drive: w1 → v1 → g1, acknowledge the gate checkpoint, then request
+    # closure via end_mission.
     # Each `advance_project` call returns at the next attention/terminal/idle.
     # We expect: first call → gate_checkpoint; we say continue;
-    # second call → Done (via clean terminal reviewer).
+    # second call → mission_running with no runnable task work;
+    # end_mission → Done (via clean terminal reviewer).
     advance_env = controller.advance_project(pid)
     state_history.append(advance_env.state.state)
     assert (
@@ -289,7 +290,13 @@ def test_smoke_hello_mission(
     if time.monotonic() > deadline:
         pytest.fail(f"smoke test exceeded {_TIMEOUT_S}s before terminal review")
 
-    final = controller.advance_project(pid)
+    post_gate = controller.advance_project(pid)
+    state_history.append(post_gate.state.state)
+    assert post_gate.state.state == "mission_running", (
+        f"expected mission_running after gate acknowledgement, got {post_gate.state.state}; "
+        f"history={state_history}"
+    )
+    final = controller.end_mission(pid)
     state_history.append(final.state.state)
     assert final.state.state == "done", (
         f"expected done after terminal review, got {final.state.state}; "
@@ -335,7 +342,7 @@ def test_smoke_hello_mission(
     assert item_passed, f"VAL-HELLO-001 not marked passed: items={val_handoff.items}"
 
     # 7) Closeout written
-    closeout = workspace / ".zenith" / "missions" / "mission-001" / "closeout.md"
+    closeout = controller.store.mission_dir(pid, "mission-001") / "closeout.md"
     assert closeout.exists(), f"missing closeout at {closeout}"
 
 
@@ -377,8 +384,9 @@ def _run_with_real_terminal_reviewer(
     controller = ProjectController(config, dispatcher, reviewer)
 
     controller.start_project("smoke test brief", str(workspace))
-    pid = ProjectStore(config).list_projects()[0].id
-    _write_contract(workspace, "mission-001")
+    pid = controller.store.list_projects()[0].id
+    _write_contract(controller.store, pid, "mission-001")
+    _write_worker_skill(controller.store, pid)
     controller.submit_plan(pid, _build_task_list())
 
     deadline = time.monotonic() + _TIMEOUT_S
@@ -391,14 +399,16 @@ def _run_with_real_terminal_reviewer(
     )
     if time.monotonic() > deadline:
         pytest.fail("smoke test ran out of budget before terminal review")
-    final = controller.advance_project(pid)
+    post_gate = controller.advance_project(pid)
+    assert post_gate.state.state == "mission_running"
+    final = controller.end_mission(pid)
     # Either Done (clean review) or attention_needed (reviewer found gaps).
     # We accept both — the goal is to confirm the L3 ACP wiring works.
     assert final.state.state in ("done", "attention_needed"), (
         f"unexpected post-terminal state: {final.state.state}"
     )
 
-    review_dir = workspace / ".zenith" / "missions" / "mission-001" / "terminal-reviews"
+    review_dir = controller.store.terminal_reviews_dir(pid, "mission-001")
     assert review_dir.is_dir() and any(review_dir.iterdir()), (
         f"terminal reviewer did not write terminal review at {review_dir}"
     )
