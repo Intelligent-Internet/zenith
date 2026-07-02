@@ -2,7 +2,16 @@
 
 <img width="1500" height="600" alt="From RALPH to Zenith — Intelligent Internet technical report" src="https://github.com/user-attachments/assets/8c3c76e7-4a54-4c6e-95b7-25db573a0881" />
 
-Technical report from Intelligent Internet (2026) on how an agent harness should control work that may run for days or weeks, where the dominant failure mode is *premature completion* rather than inability to make progress.
+<p>
+  <a href="https://github.com/Intelligent-Internet/zenith/actions/workflows/ci.yml"><img src="https://github.com/Intelligent-Internet/zenith/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue.svg" alt="Python 3.11+">
+  <a href="technical_report/Technical_Report.pdf"><img src="https://img.shields.io/badge/technical%20report-PDF-b31b1b.svg" alt="Technical Report"></a>
+</p>
+
+Zenith is an agent harness for work that may run for days or weeks, where the dominant failure mode is *premature completion* rather than inability to make progress. It runs a coding agent (Claude Code, Codex, or Hermes) as a multi-agent orchestrator over MCP/ACP: one orchestrator session reads task state each turn and decides whether to spawn workers and testers, register reusable skills, replan, or stop.
+
+This repository contains the Zenith harness ([`zenith/`](zenith/)) and the Intelligent Internet technical report (2026) behind it.
 
 > **[Read the report (PDF)](technical_report/Technical_Report.pdf)**
 
@@ -14,35 +23,38 @@ RALPH is the strongest simple baseline because it forces each new session to reo
 
 Our Zenith method keeps the useful parts of repeated review while making the loop adaptive: the orchestrator dynamically allocates workers, testers, reusable skills, replanning, and stopping decisions. In this study, Zenith achieved the best mean rank while using less than half of RALPH's per-task cost.
 
-<img width="1445" height="1088" alt="image" src="https://github.com/user-attachments/assets/200a7337-38a9-4fa2-91e6-60cc6ce07f5b" />
+<img width="1445" height="1088" alt="Benchmark results: Zenith vs. RALPH variants across eight long-horizon tasks" src="https://github.com/user-attachments/assets/200a7337-38a9-4fa2-91e6-60cc6ce07f5b" />
 
+## Quick Start
 
-## Installation
+### Option 1 — Let your agent install it
 
-### **Copy and give this to your agent harness:**
+Copy this prompt into Claude Code or Codex:
+
+```text
+/goal Read the readme at https://github.com/Intelligent-Internet/zenith, detect if using Claude Code, Codex, or both, install requirements, install and run Zenith (i.e. uv run zenith, as in the readme), and create a new skill called /zenith — when used (along with an additional prompt) it will call the skill: the minimum skill content should be: """First read .claude/orchestrator_prompt.md and treat it as your primary role, then use Zenith to run this mission.""" Afterwards, you can add information about the Zenith harness, based on the readme and the technical report (inside the repo), and info on how to start Zenith if it's not already running. Change the skill to use .codex when using it in Codex. If both harnesses are available, make sure to add the skill to both of them correctly. In fact, there might be more harness options (Hermes, for example). See what is supported in zenith/src/zenith_harness/providers.py, and for those that you detect are present, add their skills correctly. When finished, confirm to me that Zenith is installed, running, and ready, explain a bit about Zenith, and why and when to use it.
 ```
-/goal Read the readme at https://github.com/Intelligent-Internet/zenith, detect if using claude code, codex or both, install requirements, install and run Zenith (ie uv run zenith etc like in the readme) and create a new skill called /zenith - when used (along with an additional prompt) it will call the skill: the minimum skill content should be: """First read .claude/orchestrator_prompt.md and treat it as your primary role, then use Zenith to run this mission.""" and afterwards you can add information about Zenith Harness, based on the readme and the technical report (inside the repo), and info on how to start zenith if its not already running. Change the skill to use .codex when using in codex. If both hernesses are available, make sure to add these skill to both of them correctly. Infact, there might be more harness options (hermes for example). See what is supported in §zenith/src/zenith_harness/providers.py, and for those that you detect are present, add their skills correctly. When Finished, confirm to me that Zenith is installed, running and ready, explain a bit about Zenith, and why and when to use it.
-```
-This will: 
-* install zenith with requirements
-* start zenith using uv
-* create claude code and codex skills to run & use zenith
-  
-**Then, use /zenith like so - in claude code or codex, type:**
-```
+
+This will:
+
+- install Zenith with its requirements
+- start Zenith using `uv`
+- create a `/zenith` skill for each agent harness it detects
+
+Then, in Claude Code or Codex, type:
+
+```text
 /zenith <your instruction or query>
 ```
 
-### Or install it manually:
-
-Zenith is a small MCP/ACP harness that runs a coding agent as a multi-agent orchestrator. See [`zenith/`](zenith/) for the full package.
+### Option 2 — Install manually
 
 **Requirements**
 
 - Python 3.11+
 - [`uv`](https://docs.astral.sh/uv/)
 - Node.js 22+ and `npm`
-- Claude Code or Codex
+- Claude Code, Codex, or Hermes (see [`providers.py`](zenith/src/zenith_harness/providers.py) for the supported set)
 
 **Install**
 
@@ -88,7 +100,7 @@ claude
 codex
 ```
 
-Then ask the agent to read the generated orchestrator prompt:
+Then ask the agent to read the generated orchestrator prompt (use `.codex/orchestrator_prompt.md` for Codex):
 
 ```text
 First read .claude/orchestrator_prompt.md and treat it as your primary role, then use Zenith to run this mission.
@@ -96,15 +108,7 @@ First read .claude/orchestrator_prompt.md and treat it as your primary role, the
 <your instruction or query>
 ```
 
-For Codex, use:
-
-```text
-First read .codex/orchestrator_prompt.md and treat it as your primary role, then use Zenith to run this mission.
-
-<your instruction or query>
-```
-
-## Zenith
+## How Zenith Works
 
 <p align="center">
   <img src="technical_report/images/zenith.png" alt="Zenith harness architecture" width="780"/>
@@ -116,11 +120,11 @@ A single orchestrator session reads task state each turn and decides what to do 
 
 ### Frontier SWE Benchmark
 
-On the Frontier SWE benchmark, Zenith — running on GPT-5.5 — ranks first overall, leading on implementation, performance, and dominance against frontier models paired with their native harnesses.
+On the [Frontier SWE benchmark](https://www.frontierswe.com), Zenith — running on GPT-5.5 — ranks first overall, leading on implementation, performance, and dominance against frontier models paired with their native harnesses.
 
-| # | Model | Harness | AVG RANK ¹ | Dominance ² | Implementation | Performance | Research |
+| # | Model | Harness | Avg rank ↓ | Dominance ↑ | Implementation ↓ | Performance ↓ | Research ↓ |
 | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| 1 | GPT-5.5 | Zenith | 2.06 | 92% | 1.60 | 1.89 | 3.33 |
+| 1 | GPT-5.5 | **Zenith** | **2.06** | **92%** | **1.60** | **1.89** | 3.33 |
 | 2 | Claude Fable | Claude Code | 2.71 | 88% | 1.80 | 2.11 | 6.00 |
 | 3 | Claude Opus 4.8 | Claude Code | 5.06 | 71% | 4.20 | 5.56 | 5.00 |
 | 4 | GLM-5.2 | Claude Code | 5.31 | 69% | 5.60 | 6.50 | 1.67 |
@@ -136,6 +140,8 @@ On the Frontier SWE benchmark, Zenith — running on GPT-5.5 — ranks first ove
 | 14 | Kimi K2.6 | Kimi CLI | 11.82 | 25% | 10.40 | 12.78 | 11.33 |
 | 15 | Qwen3.6-Plus | Qwen Code | 12.47 | 21% | 15.00 | 10.67 | 13.67 |
 
+<sub>*Metrics as reported by the [Frontier SWE leaderboard](https://www.frontierswe.com). Rank columns: lower is better. Dominance: higher is better.*</sub>
+
 ### Ablation Study
 
 To isolate the control mechanisms that matter, we compared Zenith against RALPH and three reduced harness variants across eight long-horizon tasks. Zenith achieves the best mean rank at less than half of RALPH's per-task cost.
@@ -150,6 +156,17 @@ To isolate the control mechanisms that matter, we compared Zenith against RALPH 
 
 <sub>*A "win" is a task on which the method ranked first; the eight wins partition the eight benchmark tasks.*</sub>
 
+## Repository Layout
+
+| Path | Contents |
+| --- | --- |
+| [`zenith/`](zenith/) | The Zenith harness — Python package (`zenith-harness`), CLI, MCP server, bundled prompts and skills, tests |
+| [`technical_report/`](technical_report/) | *From RALPH to Zenith* technical report — PDF, LaTeX source, and figures |
+
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup and PR guidelines, and [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
+
 ## Citation
 
 ```bibtex
@@ -162,3 +179,7 @@ To isolate the control mechanisms that matter, we compared Zenith against RALPH 
   url         = {https://github.com/Intelligent-Internet/zenith}
 }
 ```
+
+## License
+
+The Zenith code is licensed under the [Apache License 2.0](LICENSE). The technical report and its figures are licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
