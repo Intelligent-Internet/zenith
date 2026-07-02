@@ -269,7 +269,7 @@ def _echo_next_steps(orchestrator: ProviderDefinition) -> None:
     if prompt_path:
         click.echo("  2. Ask it:")
         click.echo(
-            f"     First Read the {prompt_path} and treat it as your primary role, then use Zenith to run this mission."
+            f"     First read {prompt_path} and treat it as your primary role, then use Zenith to run this mission."
         )
         click.echo("")
         click.echo("     <your instruction or query>")

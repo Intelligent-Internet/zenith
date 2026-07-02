@@ -27,7 +27,6 @@ from .models import (
     MissionPlanning,
     MissionRunning,
     ProjectState,
-    Task,
     TaskList,
     TaskListPatch,
     TaskStateFile,

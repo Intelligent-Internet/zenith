@@ -94,7 +94,10 @@ class TestInit:
         assert server["args"] == _expected_mcp_server_args()
         assert f"Initialized v5 project workspace at {workspace}" in r.output
         assert "Start your agent from the initialized project workspace" in r.output
-        assert "Read .codex/orchestrator_prompt.md and use Zenith to run this mission." in r.output
+        assert (
+            "First read .codex/orchestrator_prompt.md and treat it as your primary role, "
+            "then use Zenith to run this mission." in r.output
+        )
 
     def test_claude_init_writes_runtime_validator_env_names(
         self, runner: CliRunner, workspace: Path, env: dict[str, str]
