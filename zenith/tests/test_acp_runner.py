@@ -155,8 +155,21 @@ def test_augment_acp_command_codex_appends_bypass_flags():
     assert out.startswith("codex-acp ")
 
 
+def test_augment_acp_command_codex_reasoning_effort_override():
+    out = _augment_acp_command("codex-acp", PROVIDERS["codex"], reasoning_effort="medium")
+    assert 'model_reasoning_effort="medium"' in out
+    assert "xhigh" not in out
+    # The bypass flags are effort-independent.
+    assert 'sandbox_mode="danger-full-access"' in out
+    assert 'approval_policy="never"' in out
+
+
 def test_augment_acp_command_claude_untouched():
     assert _augment_acp_command("claude-agent-acp", PROVIDERS["claude"]) == "claude-agent-acp"
+    assert (
+        _augment_acp_command("claude-agent-acp", PROVIDERS["claude"], reasoning_effort="low")
+        == "claude-agent-acp"
+    )
 
 
 def test_codex_acp_env_preserves_node_path_when_bwrap_is_present(

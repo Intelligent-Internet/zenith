@@ -89,22 +89,30 @@ class ACPError(Exception):
     pass
 
 
-def _augment_acp_command(command: str, provider) -> str:
+def _augment_acp_command(
+    command: str, provider, reasoning_effort: str | None = None
+) -> str:
     """Append provider-specific config flags to the ACP launch command.
 
     For codex-acp this is the no-ask, no-sandbox combo — equivalent to
     `codex --dangerously-bypass-approvals-and-sandbox`, which codex-acp
     does not expose as a flag but accepts via `-c` overrides.
 
+    `reasoning_effort` is the per-role override from
+    ZENITH_<ROLE>_REASONING_EFFORT (validated against
+    `config.VALID_REASONING_EFFORTS` at discovery); None keeps the
+    historical "xhigh" default.
+
     For hermes the command is passed through unchanged.
     """
     name = getattr(provider, "name", None)
     if name == "codex":
+        effort = reasoning_effort or "xhigh"
         return (
             command
             + ' -c sandbox_mode="danger-full-access"'
             + ' -c approval_policy="never"'
-            + ' -c model_reasoning_effort="xhigh"'
+            + f' -c model_reasoning_effort="{effort}"'
         )
     # hermes: no-op
     return command
@@ -567,7 +575,11 @@ class ACPNodeRunner:
             raise RuntimeError(
                 f"No ACP command for role={role}. Set ZENITH_{role.upper()}_ACP_COMMAND."
             )
-        acp_command = _augment_acp_command(acp_command, role_config.worker_provider)
+        acp_command = _augment_acp_command(
+            acp_command,
+            role_config.worker_provider,
+            role_config.worker_reasoning_effort,
+        )
 
         workspace_dir = str(Path(cwd).expanduser().resolve() if cwd else store.workspace_dir(project_id))
         project_bucket = str(store.zenith_dir(project_id))
@@ -733,7 +745,11 @@ class ACPNodeRunner:
                 "No ACP command for terminal reviewer. "
                 "Set ZENITH_TERMINAL_REVIEWER_ACP_COMMAND."
             )
-        acp_command = _augment_acp_command(acp_command, role_config.worker_provider)
+        acp_command = _augment_acp_command(
+            acp_command,
+            role_config.worker_provider,
+            role_config.worker_reasoning_effort,
+        )
 
         workspace_dir = str(store.workspace_dir(project_id))
         project_bucket = str(store.zenith_dir(project_id))

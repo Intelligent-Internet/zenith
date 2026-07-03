@@ -14,6 +14,10 @@ from .providers import (
 
 DEFAULT_MAX_PARALLEL_NODES = 4
 
+# codex-acp `model_reasoning_effort` values. Also a safety allowlist: the
+# resolved value is spliced into a shell command line by acp_runner.
+VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+
 
 def _bundled_dir() -> Path:
     return (Path(__file__).resolve().parent / "bundled").resolve()
@@ -35,6 +39,20 @@ def _resolve_max_parallel(value: str | None) -> int:
     return max(1, parsed)
 
 
+def _resolve_reasoning_effort(value: str | None, *, env_var: str) -> str | None:
+    """None passes through (provider default); anything else must be on the
+    allowlist — a typo silently ignored would spend xhigh the user thought
+    they had dialed down."""
+    if not value:
+        return None
+    if value not in VALID_REASONING_EFFORTS:
+        raise ValueError(
+            f"{env_var}={value!r} is not a valid reasoning effort; "
+            f"choose one of: {', '.join(VALID_REASONING_EFFORTS)}"
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class HarnessConfig:
     """Static configuration loaded from env. Per-call overrides allowed via `with_*`."""
@@ -50,6 +68,11 @@ class HarnessConfig:
     terminal_reviewer_provider_name: str | None
     terminal_reviewer_acp_command: str | None
     max_parallel_nodes: int = DEFAULT_MAX_PARALLEL_NODES
+    # Per-role reasoning effort for providers whose ACP command accepts one
+    # (codex today). None means the provider default ("xhigh" for codex).
+    worker_reasoning_effort: str | None = None
+    validator_reasoning_effort: str | None = None
+    terminal_reviewer_reasoning_effort: str | None = None
 
     @classmethod
     def discover(cls) -> HarnessConfig:
@@ -95,6 +118,18 @@ class HarnessConfig:
             terminal_reviewer_acp_command=terminal_reviewer_acp_command,
             max_parallel_nodes=_resolve_max_parallel(
                 os.environ.get("ZENITH_MAX_PARALLEL_NODES")
+            ),
+            worker_reasoning_effort=_resolve_reasoning_effort(
+                os.environ.get("ZENITH_WORKER_REASONING_EFFORT"),
+                env_var="ZENITH_WORKER_REASONING_EFFORT",
+            ),
+            validator_reasoning_effort=_resolve_reasoning_effort(
+                os.environ.get("ZENITH_VALIDATOR_REASONING_EFFORT"),
+                env_var="ZENITH_VALIDATOR_REASONING_EFFORT",
+            ),
+            terminal_reviewer_reasoning_effort=_resolve_reasoning_effort(
+                os.environ.get("ZENITH_TERMINAL_REVIEWER_REASONING_EFFORT"),
+                env_var="ZENITH_TERMINAL_REVIEWER_REASONING_EFFORT",
             ),
         )
 
@@ -197,6 +232,9 @@ class HarnessConfig:
                     self.validator_provider_name or self.worker_provider_name
                 ),
                 worker_acp_command=self.resolved_validator_acp_command,
+                worker_reasoning_effort=(
+                    self.validator_reasoning_effort or self.worker_reasoning_effort
+                ),
             )
         if role == "terminal_reviewer":
             return replace(
@@ -207,5 +245,10 @@ class HarnessConfig:
                     or self.worker_provider_name
                 ),
                 worker_acp_command=self.resolved_terminal_reviewer_acp_command,
+                worker_reasoning_effort=(
+                    self.terminal_reviewer_reasoning_effort
+                    or self.validator_reasoning_effort
+                    or self.worker_reasoning_effort
+                ),
             )
         raise ValueError(f"unknown role: {role}")
