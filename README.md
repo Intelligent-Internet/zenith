@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/intelligent-internet-zenith-badge.png)](https://mseep.ai/app/intelligent-internet-zenith)
+
 # Zenith: A Continuous-Improvement Harness for Long-Running Tasks
 
 <img width="1500" height="600" alt="From RALPH to Zenith — Intelligent Internet technical report" src="https://github.com/user-attachments/assets/8c3c76e7-4a54-4c6e-95b7-25db573a0881" />
