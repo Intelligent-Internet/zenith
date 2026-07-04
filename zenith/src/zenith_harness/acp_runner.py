@@ -119,6 +119,9 @@ def _acp_subprocess_env(provider) -> dict[str, str]:
         # Env-var hints — harmless if codex ignores them.
         env["CODEX_SANDBOX"] = "danger-full-access"
         env["CODEX_DISABLE_SANDBOX"] = "1"
+    else:
+        env.pop("CODEX_SANDBOX", None)
+        env.pop("CODEX_DISABLE_SANDBOX", None)
     return env
 
 
@@ -566,13 +569,6 @@ class ACPNodeRunner:
         handoff_path = store.attempt_path(project_id, mission_id, spawn_ts, task.id)
         handoff_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # 0) For claude-agent-acp: drop a project-level settings.json that
-        #    overrides the user's global ~/.claude/settings.json. Adapter
-        #    rejects session/new with `Invalid permissions.defaultMode: auto`
-        #    if the user's global setting carries the SDK-unsupported "auto"
-        #    default.
-        _ensure_claude_settings(Path(workspace_dir), role_config.worker_provider)
-
         # 1) Start the worker MCP server subprocess.
         mcp_port = self._find_free_port()
         mcp_process = await self._start_worker_mcp_server(
@@ -646,6 +642,7 @@ class ACPNodeRunner:
                     "clientInfo": {"name": "zenith", "version": "0.1.0"},
                 },
             )
+            await self._maybe_refresh_auth(client, role_config.worker_provider)
             session_params: dict[str, Any] = {
                 "cwd": workspace_dir,
                 "mcpServers": [worker_mcp_cfg],
@@ -732,9 +729,6 @@ class ACPNodeRunner:
         report_path = store.terminal_review_path(project_id, mission_id, spawn_ts)
         report_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Same claude-agent-acp settings workaround as run_node.
-        _ensure_claude_settings(Path(workspace_dir), role_config.worker_provider)
-
         mcp_port = self._find_free_port()
         mcp_process = await self._start_terminal_reviewer_mcp(
             project_id=project_id,
@@ -792,6 +786,7 @@ class ACPNodeRunner:
                     "clientInfo": {"name": "zenith", "version": "0.1.0"},
                 },
             )
+            await self._maybe_refresh_auth(client, role_config.worker_provider)
             session_params: dict[str, Any] = {
                 "cwd": workspace_dir,
                 "mcpServers": [worker_mcp_cfg],
@@ -946,6 +941,17 @@ class ACPNodeRunner:
             raise ACPError(
                 f"Failed to set ACP runtime mode {mode!r} for {provider.name}: {exc}"
             ) from exc
+
+    async def _maybe_refresh_auth(self, client: ACPClient, provider) -> None:
+        if getattr(provider, "name", None) != "codex":
+            return
+        try:
+            status = await client.send_request("authentication/status", {})
+        except Exception:  # noqa: BLE001
+            return
+        if not isinstance(status, dict) or status.get("type") != "chat-gpt":
+            return
+        await client.send_request("authenticate", {"methodId": "chat-gpt"})
 
     # ------------------------------------------------------------------
     # Prompt rendering
@@ -1188,45 +1194,6 @@ class ACPTerminalReviewer:
                 store=self.store,
             )
         )
-
-
-# ---------------------------------------------------------------------------
-# claude-agent-acp settings workaround
-# ---------------------------------------------------------------------------
-
-
-def _ensure_claude_settings(workspace: Path, provider) -> None:
-    """Write `<workspace>/.claude/settings.json` overriding `permissions.defaultMode`.
-
-    The `@zed-industries/claude-agent-acp` adapter loads settings as
-    user → project → local → enterprise (last write wins). Without this, a
-    user with `"permissions": {"defaultMode": "auto"}` in their global
-    `~/.claude/settings.json` will see session/new fail with
-    `Invalid permissions.defaultMode: auto.` — the Claude Code SDK does not
-    accept "auto".
-
-    We touch this file only when:
-    - The provider declares a non-empty `acp_runtime_mode` (i.e. claude).
-    - The file does not already exist (respect any user-authored override).
-
-    In v5 the workspace is the user's repo, so we conservatively no-op on
-    pre-existing files.
-    """
-    mode = getattr(provider, "acp_runtime_mode", None)
-    if not mode:
-        return
-    claude_dir = workspace / ".claude"
-    claude_dir.mkdir(parents=True, exist_ok=True)
-    settings_path = claude_dir / "settings.json"
-    if settings_path.exists():
-        # Respect user-authored settings; the user can put whatever they want
-        # in there. If their setting is "auto" we can't help — they need to
-        # change it manually.
-        return
-    settings_path.write_text(
-        json.dumps({"permissions": {"defaultMode": mode}}, indent=2) + "\n",
-        encoding="utf-8",
-    )
 
 
 __all__ = [

@@ -123,10 +123,8 @@ PROVIDERS: dict[ProviderName, ProviderDefinition] = {
         skill_dirs=(".claude/skills", ".agents/skills"),
         skill_alias_dirs=(".claude/skills", ".agents/skills"),
         config_format="mcp_json",
-        default_worker_acp_command="claude-agent-acp",
         agent_output_dir=".claude/agents",
         orchestrator_prompt_output_path=".claude/orchestrator_prompt.md",
-        acp_runtime_mode="bypassPermissions",
     ),
     "codex": ProviderDefinition(
         name="codex",
@@ -158,4 +156,4 @@ def provider_names_for_role(role: Literal["orchestrator", "worker"]) -> tuple[st
 def default_worker_provider_name(orchestrator_provider_name: str) -> str:
     if orchestrator_provider_name in PROVIDERS:
         return orchestrator_provider_name
-    return "claude"
+    return "codex"

@@ -288,7 +288,7 @@ def _resolve_selection(
 ) -> ProviderSelection:
     if agent and orchestrator and agent != orchestrator:
         raise click.UsageError("--agent conflicts with --orchestrator-provider")
-    orch = orchestrator or agent or "claude"
+    orch = orchestrator or agent or "codex"
     wrk = worker or (agent if agent in provider_names_for_role("worker") else None) or default_worker_provider_name(orch)
     return ProviderSelection(
         orchestrator=get_provider(orch),

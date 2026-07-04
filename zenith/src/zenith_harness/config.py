@@ -68,7 +68,7 @@ class HarnessConfig:
             or harness_home / "projects"
         )
         orchestrator_provider_name = os.environ.get(
-            "ZENITH_ORCHESTRATOR_PROVIDER", "claude"
+            "ZENITH_ORCHESTRATOR_PROVIDER", "codex"
         )
         worker_provider_name = os.environ.get(
             "ZENITH_WORKER_PROVIDER"
