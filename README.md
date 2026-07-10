@@ -32,14 +32,15 @@ Our Zenith method keeps the useful parts of repeated review while making the loo
 Copy this prompt into Claude Code or Codex:
 
 ```text
-/goal Read the readme at https://github.com/Intelligent-Internet/zenith, detect if using Claude Code, Codex, or both, install requirements, install and run Zenith (i.e. uv run zenith, as in the readme), and create a new skill called /zenith — when used (along with an additional prompt) it will call the skill: the minimum skill content should be: """First read .claude/orchestrator_prompt.md and treat it as your primary role, then use Zenith to run this mission.""" Afterwards, you can add information about the Zenith harness, based on the readme and the technical report (inside the repo), and info on how to start Zenith if it's not already running. Change the skill to use .codex when using it in Codex. If both harnesses are available, make sure to add the skill to both of them correctly. In fact, there might be more harness options (Hermes, for example). See what is supported in zenith/src/zenith_harness/providers.py, and for those that you detect are present, add their skills correctly. When finished, confirm to me that Zenith is installed, running, and ready, explain a bit about Zenith, and why and when to use it.
+/goal Read the README at https://github.com/Intelligent-Internet/zenith, install its requirements and ACP adapter, then run `uv run zenith init --scope user --agent claude` for Claude Code or `uv run zenith init --scope user --agent codex` for Codex. If both hosts are installed, run both commands. Confirm that the user-scoped MCP server and `/zenith` skill were installed, and tell me to start a new host session before using `/zenith <mission>`.
 ```
 
 This will:
 
 - install Zenith with its requirements
 - start Zenith using `uv`
-- create a `/zenith` skill for each agent harness it detects
+- register Zenith for every workspace in each detected host
+- create a personal `/zenith` skill and install Zenith's agent assets
 
 Then, in Claude Code or Codex, type:
 
@@ -76,19 +77,49 @@ npm install -g @agentclientprotocol/codex-acp
 command -v codex-acp
 ```
 
-**Initialize a workspace**
+**Install for every workspace (recommended)**
 
-Initialize the project workspace Zenith should operate on. This is your target app/repo, not the Zenith source checkout:
+Run user-scope setup from the Zenith checkout:
 
 ```bash
-# Claude Code, from this Zenith checkout
-uv run zenith init --workspace-dir /path/to/your-app --agent claude
+# Claude Code
+uv run zenith init --scope user --agent claude
 
-# Or Codex, from this Zenith checkout
-uv run zenith init --workspace-dir /path/to/your-app --agent codex
+# Codex
+uv run zenith init --scope user --agent codex
+
+# If you use both, run both commands in either order.
 ```
 
-**Run a mission**
+User scope writes only Zenith's MCP registration and managed assets. It preserves existing
+Codex/Claude preferences and does not select a model, reasoning effort, sandbox mode, or
+persist ambient API/model environment variables. `CODEX_HOME` and `CLAUDE_CONFIG_DIR` are
+honored when set.
+
+The MCP command contains the absolute path to this checkout. If you move or remove the
+checkout, rerun the corresponding user-scope command from its new location. User scope is
+currently supported for Claude Code and Codex; use project scope for Hermes.
+
+Restart the host or start a new session once after installation. You can then open any
+workspace and run:
+
+```text
+/zenith <your instruction or query>
+```
+
+**Install for one project instead**
+
+Project scope remains the default and writes host configuration into the target workspace:
+
+```bash
+uv run zenith init --scope project --workspace-dir /path/to/your-app --agent claude
+uv run zenith init --scope project --workspace-dir /path/to/your-app --agent codex
+uv run zenith init --scope project --workspace-dir /path/to/your-app --agent hermes
+```
+
+`--scope project` may be omitted for backward compatibility.
+
+**Run a project-scoped mission**
 
 Start your agent from the initialized project workspace:
 

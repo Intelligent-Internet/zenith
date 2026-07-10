@@ -31,28 +31,44 @@ npm install -g @agentclientprotocol/codex-acp
 command -v codex-acp
 ```
 
-Initialize the project workspace Zenith should operate on. This is your target
-app/repo, not the Zenith source checkout:
+Install Zenith once for every workspace in your user account:
 
 ```bash
-# Claude Code, from this Zenith checkout
-uv run zenith init --workspace-dir /path/to/your-app --agent claude
+# Claude Code
+uv run zenith init --scope user --agent claude
 
-# Or Codex, from this Zenith checkout
-uv run zenith init --workspace-dir /path/to/your-app --agent codex
+# Codex
+uv run zenith init --scope user --agent codex
+
+# Run both commands if you use both hosts.
 ```
 
-Start your agent from the initialized project workspace:
+This registers the user-scoped MCP server and installs a personal `/zenith`
+skill, orchestrator prompt, agents, and playbooks. Existing model, reasoning,
+sandbox, feature, and unrelated MCP settings are preserved. Ambient API/model
+environment variables are not copied into the user configuration.
+
+`CODEX_HOME` and `CLAUDE_CONFIG_DIR` are honored. The generated MCP command
+contains the absolute path to this checkout, so rerun setup after moving it.
+Hermes currently supports project scope only.
+
+Restart Claude Code or Codex once, then use Zenith from any workspace:
+
+```text
+/zenith <your instruction or query>
+```
+
+For repository-specific setup, initialize the target app/repo instead:
 
 ```bash
-cd /path/to/your-app
-
-claude
-# or
-codex
+uv run zenith init --scope project --workspace-dir /path/to/your-app --agent claude
+uv run zenith init --scope project --workspace-dir /path/to/your-app --agent codex
+uv run zenith init --scope project --workspace-dir /path/to/your-app --agent hermes
 ```
 
-Then ask the agent to read the generated orchestrator prompt:
+Project scope is the backward-compatible default, so `--scope project` may be
+omitted. Start the host in that workspace and ask it to read the generated
+orchestrator prompt:
 
 ```text
 First read .claude/orchestrator_prompt.md and treat it as your primary role, then use Zenith to run this mission.

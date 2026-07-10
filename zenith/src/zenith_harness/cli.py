@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
+import tempfile
+import tomllib
 from pathlib import Path
 
 import click
@@ -38,6 +41,8 @@ MCP_ENV_FORWARD_ALLOWLIST = (
     "ZAI_BASE_URL",
 )
 
+USER_SCOPE_ORCHESTRATORS = ("claude", "codex")
+
 
 @click.group()
 def cli() -> None:
@@ -72,7 +77,14 @@ def cli() -> None:
 @click.option("--terminal-reviewer-provider", type=click.Choice(provider_names_for_role("worker")), default=None)
 @click.option("--terminal-reviewer-acp-command", default=None)
 @click.option("--zenith-home", type=click.Path(), default=None)
-@click.option("--workspace-dir", "workspace_dir", type=click.Path(exists=True), default=".")
+@click.option(
+    "--scope",
+    type=click.Choice(("project", "user")),
+    default="project",
+    show_default=True,
+    help="Install into one project or the current user's host configuration.",
+)
+@click.option("--workspace-dir", "workspace_dir", type=click.Path(exists=True), default=None)
 def init(
     agent: str | None,
     orchestrator_provider: str | None,
@@ -83,17 +95,16 @@ def init(
     terminal_reviewer_provider: str | None,
     terminal_reviewer_acp_command: str | None,
     zenith_home: str | None,
-    workspace_dir: str,
+    scope: str,
+    workspace_dir: str | None,
 ) -> None:
-    """Initialize host-agent surface: MCP/codex config + provider agents + orchestrator prompt.
+    """Initialize Zenith's host-agent surface.
 
-    The project bucket is created by `start_project` at the first MCP call from
-    the host agent — `zenith init` stages the host-agent-facing files the agent
-    loads at startup (provider configs, subagent definitions, orchestrator
-    prompt, and the bundled skill surface under the provider's skill dirs). The
-    workspace stays clean of `.zenith/` until `start_project` runs.
+    Project scope (the default) stages MCP config and assets in one workspace.
+    User scope registers Zenith and installs its assets once for every workspace
+    in Claude Code or Codex. In both scopes, the project bucket is created lazily
+    by `start_project` at the first MCP call.
     """
-    workspace = Path(workspace_dir).resolve()
     config = HarnessConfig.discover()
     loader = AssetLoader(config)
     selection = _resolve_selection(
@@ -106,6 +117,27 @@ def init(
         terminal_reviewer=terminal_reviewer_provider,
         terminal_reviewer_acp_command=terminal_reviewer_acp_command,
     )
+
+    if scope == "user":
+        if workspace_dir is not None:
+            raise click.UsageError("--workspace-dir cannot be used with --scope user")
+        if selection.orchestrator.name not in USER_SCOPE_ORCHESTRATORS:
+            supported = ", ".join(USER_SCOPE_ORCHESTRATORS)
+            raise click.UsageError(
+                f"--scope user supports these orchestrators: {supported}; "
+                f"use --scope project for {selection.orchestrator.name}"
+            )
+        storage_env = _storage_env(
+            zenith_home=zenith_home,
+            workspace=Path.cwd(),
+            selection=selection,
+        )
+        _write_user_bootstrap_config(selection, storage_env)
+        _setup_user_provider_assets(loader, selection.orchestrator)
+        _echo_user_next_steps(selection)
+        return
+
+    workspace = Path(workspace_dir or ".").resolve()
 
     # 1) MCP / Codex config
     storage_env = _storage_env(zenith_home=zenith_home, workspace=workspace, selection=selection)
@@ -260,6 +292,21 @@ def _copy_skills(loader: AssetLoader, target: Path) -> None:
         shutil.copy2(skill_dir / "SKILL.md", dest / "SKILL.md")
 
 
+def _echo_user_next_steps(selection: ProviderSelection) -> None:
+    provider = selection.orchestrator.name
+    host = {"claude": "Claude Code", "codex": "Codex"}.get(provider, provider)
+    click.echo(
+        f"\nInitialized v5 user scope: orchestrator={provider}, "
+        f"worker={selection.worker.name}, "
+        f"validator={selection.resolved_validation_worker.name}."
+    )
+    click.echo("Zenith is available from every workspace for this user.")
+    click.echo("")
+    click.echo("Next:")
+    click.echo(f"  1. Restart {host} or start a new session.")
+    click.echo("  2. Run: /zenith <your instruction or query>")
+
+
 def _echo_next_steps(orchestrator: ProviderDefinition) -> None:
     prompt_path = orchestrator.orchestrator_prompt_output_path
     click.echo("")
@@ -349,6 +396,219 @@ def _mcp_server_args() -> list[str]:
     ]
 
 
+def _claude_user_paths() -> tuple[Path, Path]:
+    configured = os.environ.get("CLAUDE_CONFIG_DIR")
+    if configured:
+        root = Path(configured).expanduser().resolve()
+        return root, root / ".claude.json"
+    home = Path.home().resolve()
+    return home / ".claude", home / ".claude.json"
+
+
+def _codex_user_paths() -> tuple[Path, Path]:
+    root = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+    root = root.expanduser().resolve()
+    return root, root / "config.toml"
+
+
+def _user_paths(provider: ProviderDefinition) -> tuple[Path, Path]:
+    if provider.name == "claude":
+        return _claude_user_paths()
+    if provider.name == "codex":
+        return _codex_user_paths()
+    raise ValueError(f"user-scope paths are not defined for {provider.name}")
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    previous_mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.zenith-",
+            delete=False,
+        ) as handle:
+            handle.write(text)
+            temp_path = Path(handle.name)
+        if previous_mode is not None:
+            temp_path.chmod(previous_mode)
+        os.replace(temp_path, path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+
+
+def _user_server_config(selection: ProviderSelection, storage_env: dict[str, str]) -> dict:
+    return {
+        "type": "stdio",
+        "command": "uv",
+        "args": _mcp_server_args(),
+        "env": {**selection.env(), **storage_env},
+    }
+
+
+def _write_claude_user_config(
+    path: Path,
+    selection: ProviderSelection,
+    storage_env: dict[str, str],
+) -> None:
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise click.ClickException(f"Cannot update invalid Claude config {path}: {exc}") from exc
+    else:
+        existing = {}
+    if not isinstance(existing, dict):
+        raise click.ClickException(f"Cannot update Claude config {path}: root must be an object")
+    mcp_servers = existing.setdefault("mcpServers", {})
+    if not isinstance(mcp_servers, dict):
+        raise click.ClickException(
+            f"Cannot update Claude config {path}: mcpServers must be an object"
+        )
+    mcp_servers["zenith"] = _user_server_config(selection, storage_env)
+    _write_text_atomic(path, json.dumps(existing, indent=2) + "\n")
+    click.echo(f"Wrote {path}")
+
+
+def _toml_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _toml_table_path(line: str) -> tuple[str, ...] | None:
+    stripped = line.strip()
+    if not stripped.startswith("[") or stripped.startswith("[["):
+        return None
+    try:
+        parsed = tomllib.loads(f"{stripped}\n")
+    except tomllib.TOMLDecodeError:
+        return None
+    path: list[str] = []
+    current = parsed
+    while len(current) == 1:
+        key, value = next(iter(current.items()))
+        if not isinstance(value, dict):
+            return None
+        path.append(key)
+        current = value
+    return tuple(path) if not current else None
+
+
+def _strip_toml_tables(text: str, table: tuple[str, ...]) -> str:
+    kept: list[str] = []
+    removing = False
+    for line in text.splitlines(keepends=True):
+        path = _toml_table_path(line)
+        if path is not None:
+            removing = path[: len(table)] == table
+        if not removing:
+            kept.append(line)
+    return "".join(kept).rstrip()
+
+
+def _write_codex_user_config(
+    path: Path,
+    selection: ProviderSelection,
+    storage_env: dict[str, str],
+) -> None:
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    try:
+        tomllib.loads(existing)
+    except tomllib.TOMLDecodeError as exc:
+        raise click.ClickException(f"Cannot update invalid Codex config {path}: {exc}") from exc
+
+    start = "# BEGIN zenith"
+    end = "# END zenith"
+    if (start in existing) != (end in existing):
+        raise click.ClickException(
+            f"Cannot update Codex config {path}: incomplete Zenith managed block"
+        )
+    if start not in existing:
+        existing = _strip_toml_tables(existing, ("mcp_servers", "zenith"))
+
+    server = _user_server_config(selection, storage_env)
+    env_lines = "\n".join(
+        f"{key} = {_toml_string(value)}" for key, value in server["env"].items()
+    )
+    block = (
+        f"{start}\n"
+        "[mcp_servers.zenith]\n"
+        'command = "uv"\n'
+        f"args = {json.dumps(server['args'], ensure_ascii=False)}\n"
+        "startup_timeout_sec = 10\n"
+        "tool_timeout_sec = 1000000\n"
+        "\n"
+        "[mcp_servers.zenith.env]\n"
+        f"{env_lines}\n"
+        f"{end}\n"
+    )
+    updated = _replace_managed_block_text(existing, start, end, block)
+    try:
+        tomllib.loads(updated)
+    except tomllib.TOMLDecodeError as exc:
+        raise click.ClickException(f"Generated invalid Codex config for {path}: {exc}") from exc
+    _write_text_atomic(path, updated)
+    click.echo(f"Wrote {path}")
+
+
+def _write_user_bootstrap_config(
+    selection: ProviderSelection,
+    storage_env: dict[str, str],
+) -> None:
+    _, config_path = _user_paths(selection.orchestrator)
+    if selection.orchestrator.name == "claude":
+        _write_claude_user_config(config_path, selection, storage_env)
+    elif selection.orchestrator.name == "codex":
+        _write_codex_user_config(config_path, selection, storage_env)
+    else:
+        raise ValueError(f"unsupported user-scope provider: {selection.orchestrator.name}")
+
+
+def _zenith_skill_body(prompt_path: Path) -> str:
+    return f'''---
+name: zenith
+description: Run a long-horizon mission through the Zenith continuous-improvement harness.
+---
+
+# /zenith
+
+First read `{prompt_path}` and treat it as your primary role, then use the globally
+registered Zenith MCP tools to run the mission supplied with this skill.
+
+If the Zenith tools are unavailable, ask the user to restart the host or start a new
+session. Do not run workspace initialization merely because the current workspace has
+no local Zenith configuration; project state begins with `start_project(brief,
+workspace_dir)`.
+'''
+
+
+def _setup_user_provider_assets(loader: AssetLoader, provider: ProviderDefinition) -> None:
+    root, _ = _user_paths(provider)
+    agents_dir = root / "agents"
+    _copy_provider_agents(loader, agents_dir, provider.name)
+    click.echo(f"Installed {provider.name} subagents to {agents_dir}")
+
+    skills_dir = root / "skills"
+    _copy_skills(loader, skills_dir)
+    click.echo(f"Installed bundled skills to {skills_dir}")
+
+    shared_skills_dir = Path.home().resolve() / ".agents" / "skills"
+    _copy_skills(loader, shared_skills_dir)
+    click.echo(f"Installed bundled skills to {shared_skills_dir}")
+
+    prompt_path = root / "orchestrator_prompt.md"
+    prompt = loader.load_prompt_file("orchestrator", "system_prompt.md")
+    _write_text_atomic(prompt_path, prompt)
+    click.echo(f"Wrote {prompt_path}")
+
+    skill_path = skills_dir / "zenith" / "SKILL.md"
+    _write_text_atomic(skill_path, _zenith_skill_body(prompt_path))
+    click.echo(f"Wrote {skill_path}")
+
+
 def _write_bootstrap_config(
     workspace: Path,
     selection: ProviderSelection,
@@ -398,8 +658,7 @@ def _write_bootstrap_config(
         raise ValueError(f"unsupported config_format: {fmt}")
 
 
-def _replace_managed_block(path: Path, start: str, end: str, block: str) -> None:
-    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+def _replace_managed_block_text(existing: str, start: str, end: str, block: str) -> str:
     if start in existing and end in existing:
         before, _, tail = existing.partition(start)
         _, _, after = tail.partition(end)
@@ -414,6 +673,12 @@ def _replace_managed_block(path: Path, start: str, end: str, block: str) -> None
         if updated:
             updated += "\n\n"
         updated += block.rstrip() + "\n"
+    return updated
+
+
+def _replace_managed_block(path: Path, start: str, end: str, block: str) -> None:
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    updated = _replace_managed_block_text(existing, start, end, block)
     path.write_text(updated, encoding="utf-8")
 
 
