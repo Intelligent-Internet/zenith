@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import logging
 import os
-from typing import Annotated, Any
+from typing import Annotated, Any, Callable
 
 from fastmcp import Context, FastMCP
 from pydantic import Field
@@ -99,6 +100,49 @@ def create_terminal_reviewer_server() -> FastMCP:
 # ---------------------------------------------------------------------------
 
 
+def _run_project_locked(
+    controller: ProjectController,
+    project_id: str,
+    fn: Callable[..., Any],
+    *args: Any,
+) -> Any:
+    """Run a mutating controller call while holding an OS advisory lock whose
+    lifetime is tied to THIS WORKER THREAD, not to the async MCP request.
+
+    The tools hop into a thread via ``asyncio.to_thread``; a running thread's
+    future cannot be cancelled, so if the MCP request is aborted mid-wave (user
+    interrupt or client idle-abort) the thread keeps running to completion. The
+    in-process ``asyncio.Lock`` releases on that cancellation, which previously
+    let a retried call run concurrently and race on disk state
+    (task-state.json / attempts/*.json), stubbing still-in-flight validators and
+    failing gates on empty verdicts.
+
+    An advisory ``flock`` taken here — inside the thread, released only when the
+    file handle closes as this function returns — spans the true wave lifetime.
+    A concurrent mutating call gets ``wave_in_progress`` instead of racing.
+    """
+    runtime = controller.config.zenith_runtime_dir(project_id)
+    try:
+        runtime.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Project may not exist yet or path is unwritable; let the real call
+        # raise its own not_found/validation ToolError rather than masking it.
+        return fn(*args)
+    lock_path = runtime / ".wave.lock"
+    with open(lock_path, "w") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ToolError(
+                "wave_in_progress",
+                "another mutating call is already running for this project; poll "
+                ".zenith-runtime/missions/<mid>/task-state.json and retry when the "
+                "wave is terminal (do not interrupt or re-issue a running "
+                "advance_project)",
+            ) from exc
+        return fn(*args)
+
+
 def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) -> None:
     # Per-project lock around mutating controller calls. The thread hop in each
     # tool prevents event-loop blocking, but two same-project tool calls could
@@ -166,7 +210,14 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
         async with await _project_lock(project_id):
             try:
                 return _to_payload(
-                    await asyncio.to_thread(controller.submit_plan, project_id, task_list)
+                    await asyncio.to_thread(
+                        _run_project_locked,
+                        controller,
+                        project_id,
+                        controller.submit_plan,
+                        project_id,
+                        task_list,
+                    )
                 )
             except ToolError as exc:
                 return _to_payload(exc)
@@ -193,7 +244,14 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
         async with await _project_lock(project_id):
             try:
                 return _to_payload(
-                    await asyncio.to_thread(controller.advance_project, project_id, max_steps)
+                    await asyncio.to_thread(
+                        _run_project_locked,
+                        controller,
+                        project_id,
+                        controller.advance_project,
+                        project_id,
+                        max_steps,
+                    )
                 )
             except ToolError as exc:
                 return _to_payload(exc)
@@ -215,7 +273,13 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
         async with await _project_lock(project_id):
             try:
                 return _to_payload(
-                    await asyncio.to_thread(controller.end_mission, project_id)
+                    await asyncio.to_thread(
+                        _run_project_locked,
+                        controller,
+                        project_id,
+                        controller.end_mission,
+                        project_id,
+                    )
                 )
             except ToolError as exc:
                 return _to_payload(exc)
@@ -240,7 +304,14 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
         async with await _project_lock(project_id):
             try:
                 return _to_payload(
-                    await asyncio.to_thread(controller.decide_attention, project_id, decisions)
+                    await asyncio.to_thread(
+                        _run_project_locked,
+                        controller,
+                        project_id,
+                        controller.decide_attention,
+                        project_id,
+                        decisions,
+                    )
                 )
             except ToolError as exc:
                 return _to_payload(exc)
@@ -276,7 +347,14 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
         async with await _project_lock(project_id):
             try:
                 return _to_payload(
-                    await asyncio.to_thread(controller.abort_project, project_id, reason)
+                    await asyncio.to_thread(
+                        _run_project_locked,
+                        controller,
+                        project_id,
+                        controller.abort_project,
+                        project_id,
+                        reason,
+                    )
                 )
             except ToolError as exc:
                 return _to_payload(exc)
