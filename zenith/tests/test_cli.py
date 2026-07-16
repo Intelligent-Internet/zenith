@@ -99,6 +99,48 @@ class TestInit:
             "then use Zenith to run this mission." in r.output
         )
 
+    def test_claude_init_writes_reasoning_effort_env(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("ZENITH_WORKER_REASONING_EFFORT", "high")
+        monkeypatch.setenv("ZENITH_VALIDATOR_REASONING_EFFORT", "medium")
+        monkeypatch.setenv("ZENITH_TERMINAL_REVIEWER_REASONING_EFFORT", "low")
+
+        r = runner.invoke(cli, ["init", "--workspace-dir", str(workspace), "--agent", "claude"])
+        assert r.exit_code == 0, r.output
+
+        mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
+        server_env = mcp["mcpServers"]["zenith"]["env"]
+        assert server_env["ZENITH_WORKER_REASONING_EFFORT"] == "high"
+        assert server_env["ZENITH_VALIDATOR_REASONING_EFFORT"] == "medium"
+        assert server_env["ZENITH_TERMINAL_REVIEWER_REASONING_EFFORT"] == "low"
+
+    def test_codex_init_writes_reasoning_effort_env(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("ZENITH_WORKER_REASONING_EFFORT", "high")
+        monkeypatch.setenv("ZENITH_VALIDATOR_REASONING_EFFORT", "medium")
+        monkeypatch.setenv("ZENITH_TERMINAL_REVIEWER_REASONING_EFFORT", "low")
+
+        r = runner.invoke(cli, ["init", "--workspace-dir", str(workspace), "--agent", "codex"])
+        assert r.exit_code == 0, r.output
+
+        config = tomllib.loads(
+            (workspace / ".codex" / "config.toml").read_text(encoding="utf-8")
+        )
+        server_env = config["mcp_servers"]["zenith"]["env"]
+        assert server_env["ZENITH_WORKER_REASONING_EFFORT"] == "high"
+        assert server_env["ZENITH_VALIDATOR_REASONING_EFFORT"] == "medium"
+        assert server_env["ZENITH_TERMINAL_REVIEWER_REASONING_EFFORT"] == "low"
+
     def test_claude_init_writes_runtime_validator_env_names(
         self, runner: CliRunner, workspace: Path, env: dict[str, str]
     ) -> None:

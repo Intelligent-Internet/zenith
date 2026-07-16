@@ -19,7 +19,7 @@ from .providers import (
 )
 from .storage import ProjectStore
 
-MCP_ENV_FORWARD_ALLOWLIST = (
+RUNTIME_ENV_FORWARD_ALLOWLIST = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
@@ -34,6 +34,9 @@ MCP_ENV_FORWARD_ALLOWLIST = (
     "GLM_API_KEY",
     "GLM_BASE_URL",
     "MAX_THINKING_TOKENS",
+    "ZENITH_WORKER_REASONING_EFFORT",
+    "ZENITH_VALIDATOR_REASONING_EFFORT",
+    "ZENITH_TERMINAL_REVIEWER_REASONING_EFFORT",
     "ZAI_API_KEY",
     "ZAI_BASE_URL",
 )
@@ -311,10 +314,10 @@ def _storage_env(
     return env
 
 
-def _forwarded_mcp_env() -> dict[str, str]:
+def _forwarded_runtime_env() -> dict[str, str]:
     return {
         key: value
-        for key in MCP_ENV_FORWARD_ALLOWLIST
+        for key in RUNTIME_ENV_FORWARD_ALLOWLIST
         if (value := os.environ.get(key))
     }
 
@@ -355,10 +358,9 @@ def _write_bootstrap_config(
     storage_env: dict[str, str],
 ) -> None:
     fmt = selection.orchestrator.config_format
-    env = {**selection.env(), **storage_env}
+    env = {**selection.env(), **storage_env, **_forwarded_runtime_env()}
     server_args = _mcp_server_args()
     if fmt == "mcp_json":
-        env = {**env, **_forwarded_mcp_env()}
         path = workspace / ".mcp.json"
         existing = (
             json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
