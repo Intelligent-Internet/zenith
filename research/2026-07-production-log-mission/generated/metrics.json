@@ -1,0 +1,139 @@
+{
+  "artifacts": {
+    "durable_project_tree": {
+      "allocated_bytes": 42120847360,
+      "files": 31153,
+      "hardlink_aliases": 2,
+      "logical_bytes": 42055447824,
+      "unique_inodes": 31151
+    },
+    "mission_evidence": {
+      "allocated_bytes": 42118688768,
+      "files": 30878,
+      "hardlink_aliases": 2,
+      "logical_bytes": 42053903120,
+      "unique_inodes": 30876
+    },
+    "runtime_tree": {
+      "allocated_bytes": 1318912,
+      "files": 151,
+      "hardlink_aliases": 0,
+      "logical_bytes": 988971,
+      "unique_inodes": 151
+    }
+  },
+  "elapsed": {
+    "effective_parallelism_when_busy": 1.42,
+    "idle_gap_count_at_least_5m": 6,
+    "largest_idle_gaps_seconds": [
+      27433.342,
+      18413.589,
+      6448.123,
+      5779.958,
+      901.639,
+      441.375
+    ],
+    "matched_worker_and_reviewer_active_hours": 46.637,
+    "matched_worker_and_reviewer_active_seconds": 167894.006,
+    "nonbusy_hours": 17.703,
+    "nonbusy_seconds": 63730.923,
+    "planning_to_first_dispatch_seconds": 6441.0,
+    "union_busy_seconds": 118213.077,
+    "wall_hours": 50.54,
+    "wall_seconds": 181944.0
+  },
+  "execution": {
+    "attempt_count": 142,
+    "attempt_outcomes": {
+      "done_false": 34,
+      "done_true": 108,
+      "requested_attention": 39,
+      "validator_passed_false": 23,
+      "validator_passed_true": 11
+    },
+    "decision_actions": {
+      "continue": 6,
+      "patch": 30,
+      "retry": 5
+    },
+    "decision_count": 41,
+    "matched_sessions": 145,
+    "report_failclosed_validator_attempts": 16,
+    "terminal_review_count": 3,
+    "terminal_review_results": {
+      "done_false": 3
+    },
+    "unmatched_attempt_count": 0,
+    "unmatched_attempts": []
+  },
+  "method_limits": [
+    "Session token counters are Codex-reported totals; input totals include cached input and should not be added to cached input again.",
+    "Active time uses task_started/task_complete intervals from matched Codex sessions. It excludes uninstrumented shell/service latency outside those sessions.",
+    "The task and contract baselines are inferred by subtracting patch additions from final state; in-place textual growth is not represented.",
+    "No production-log payload or mission evidence content was opened by this profiler; only orchestration metadata was read."
+  ],
+  "source": {
+    "analysis_end_at": "2026-07-19T15:36:09Z",
+    "mission_id": "mission-001",
+    "project_created_at": "2026-07-17T13:03:45Z",
+    "project_id": "20260717T130345Z-read-only-all-around-production-log-research-for-agent-builder-p",
+    "runtime_state_after_reviews": "mission_running",
+    "workspace_dir": "/Users/aleksandrpodgaiko/Desktop/agents/cx"
+  },
+  "stage_active_seconds": {
+    "analysis": 17820.072,
+    "fail_closed_analysis_repair": 13221.724,
+    "manual_semantic_reliability": 65329.389,
+    "other_work": 5920.855,
+    "planning": 6441.0,
+    "population_and_retrieval": 15843.513,
+    "report_provenance_repair": 11029.622,
+    "terminal_review": 1251.857,
+    "validation": 37476.974
+  },
+  "stage_total_tokens": {
+    "analysis": 127431741,
+    "fail_closed_analysis_repair": 75766825,
+    "manual_semantic_reliability": 332798453,
+    "other_work": 31290366,
+    "population_and_retrieval": 94243675,
+    "report_provenance_repair": 69659447,
+    "terminal_review": 6889677,
+    "validation": 227246809
+  },
+  "topology": {
+    "contract_growth_factor": 2.588,
+    "contract_statuses": {
+      "failed": 15,
+      "passed": 22,
+      "pending": 7
+    },
+    "final_contract_count": 44,
+    "final_task_count": 168,
+    "initial_contract_count_inferred": 17,
+    "initial_task_count_inferred": 24,
+    "patch_growth": {
+      "added_contracts": 27,
+      "added_tasks": 144,
+      "cancelled_tasks": 0,
+      "superseded_tasks": 53
+    },
+    "task_growth_factor": 7.0,
+    "task_statuses": {
+      "cleared": 117,
+      "superseded": 51
+    },
+    "task_types": {
+      "gate": 20,
+      "validate": 40,
+      "work": 108
+    }
+  },
+  "usage": {
+    "cached_input_tokens": 933481472,
+    "input_tokens": 961189196,
+    "output_tokens": 4137797,
+    "reasoning_output_tokens": 840842,
+    "total_tokens": 965326993
+  }
+}
