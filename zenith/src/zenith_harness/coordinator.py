@@ -4,9 +4,11 @@ See `specs/task_list/PRODUCT.md` §Dispatch. One `step()` call advances
 the state by at most one transition. The controller's `advance_project`
 tool loops `step()` until a returnable condition.
 """
+
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -21,6 +23,7 @@ from .models import (
     AttentionItemInternal,
     AttentionNeeded,
     Aborted,
+    AttemptTelemetry,
     ContractStateEntry,
     Done,
     Draft,
@@ -30,10 +33,12 @@ from .models import (
     Task,
     TaskList,
     TaskStateFile,
+    TerminalReviewConfig,
+    TerminalReviewMetadata,
     ValidateHandoff,
     WorkHandoff,
 )
-from .storage import ProjectStore, utc_now_filesafe
+from .storage import ProjectStore, utc_now_filesafe, utc_now_iso
 from .envelope import public_attention_items
 
 
@@ -111,9 +116,7 @@ class MissionCoordinator:
         try:
             tl = self.store.load_task_list(self.project_id, mid)
         except FileNotFoundError:
-            self.store.save_state(
-                self.project_id, Failed(reason=f"tasks.json missing for {mid}")
-            )
+            self.store.save_state(self.project_id, Failed(reason=f"tasks.json missing for {mid}"))
             return StepResult.terminal("task_list missing")
         task_state = self.store.load_task_state(self.project_id, mid)
         contract_state = self.store.load_contract_state(self.project_id, mid)
@@ -152,6 +155,7 @@ class MissionCoordinator:
         task_state.set_status(task.id, "running")
         task_state.set_last_attempt(task.id, spawn_ts)
         self.store.save_task_state(self.project_id, mid, task_state)
+        self._begin_attempt_telemetry(mid, task, spawn_ts)
 
         request = DispatchRequest(
             project_id=self.project_id,
@@ -170,26 +174,24 @@ class MissionCoordinator:
                 task.id,
                 synthetic,
             )
+            self._finish_attempt_telemetry(mid, task, spawn_ts, synthetic, error=str(exc))
             return self._apply_handoff(mid, task, synthetic, spawn_ts)
 
         self.store.save_attempt(self.project_id, mid, spawn_ts, task.id, handoff)
+        self._finish_attempt_telemetry(mid, task, spawn_ts, handoff)
         return self._apply_handoff(mid, task, handoff, spawn_ts)
 
     # ------------------------------------------------------------------
     # Runnable selection (the only graph-shape-coupled code)
     # ------------------------------------------------------------------
 
-    def _next_runnable_task(
-        self, tl: TaskList, task_state: TaskStateFile
-    ) -> Task | None:
+    def _next_runnable_task(self, tl: TaskList, task_state: TaskStateFile) -> Task | None:
         pending = self._all_runnable_tasks(tl, task_state)
         if not pending:
             return None
         return pending[0]
 
-    def _all_runnable_tasks(
-        self, tl: TaskList, task_state: TaskStateFile
-    ) -> list[Task]:
+    def _all_runnable_tasks(self, tl: TaskList, task_state: TaskStateFile) -> list[Task]:
         """Runnable = non-gate, pending, all deps cleared.
 
         `supersede` and `cancel` patches rewrite downstream `depends_on`
@@ -204,9 +206,7 @@ class MissionCoordinator:
                 continue
             if task_state.status_of(task.id) != "pending":
                 continue
-            if all(
-                task_state.status_of(dep) == "cleared" for dep in task.depends_on
-            ):
+            if all(task_state.status_of(dep) == "cleared" for dep in task.depends_on):
                 runnable.append(task)
         return runnable
 
@@ -218,11 +218,7 @@ class MissionCoordinator:
     ) -> list[Task]:
         """Prefer a complete ready validator lane before starting more work."""
         by_id = {task.id: task for task in tl.tasks}
-        runnable_validators = {
-            task.id
-            for task in runnable
-            if task.type == "validate"
-        }
+        runnable_validators = {task.id for task in runnable if task.type == "validate"}
         for gate in (task for task in tl.tasks if task.type == "gate"):
             if task_state.status_of(gate.id) != "pending":
                 continue
@@ -238,8 +234,7 @@ class MissionCoordinator:
                 dep = by_id.get(dep_id)
                 if dep is not None and dep.type == "validate":
                     deps_ready = (
-                        task_state.status_of(dep_id) == "cleared"
-                        or dep_id in runnable_validators
+                        task_state.status_of(dep_id) == "cleared" or dep_id in runnable_validators
                     )
                 else:
                     deps_ready = task_state.status_of(dep_id) == "cleared"
@@ -248,11 +243,7 @@ class MissionCoordinator:
             if not deps_ready:
                 continue
             validator_dep_set = set(runnable_validators).intersection(validator_dep_ids)
-            return [
-                task
-                for task in runnable
-                if task.id in validator_dep_set
-            ]
+            return [task for task in runnable if task.id in validator_dep_set]
         return []
 
     def _dispatch_batch(
@@ -267,9 +258,8 @@ class MissionCoordinator:
             spawn_ts = self._batch_spawn_ts(index)
             task_state.set_status(task.id, "running")
             task_state.set_last_attempt(task.id, spawn_ts)
-            batch_attempts.append(
-                _BatchAttempt(task=task, spawn_ts=spawn_ts)
-            )
+            batch_attempts.append(_BatchAttempt(task=task, spawn_ts=spawn_ts))
+            self._begin_attempt_telemetry(mid, task, spawn_ts)
         self.store.save_task_state(self.project_id, mid, task_state)
 
         requests = [
@@ -293,6 +283,7 @@ class MissionCoordinator:
                 attempt.task.id,
                 handoff,
             )
+            self._finish_attempt_telemetry(mid, attempt.task, attempt.spawn_ts, handoff)
             attention.extend(
                 self._apply_handoff_collect(mid, attempt.task, handoff, attempt.spawn_ts)
             )
@@ -302,6 +293,44 @@ class MissionCoordinator:
             return StepResult.attention_needed("batch_attention")
         return StepResult.advanced(
             "batch cleared: " + ", ".join(attempt.task.id for attempt in batch_attempts)
+        )
+
+    def _begin_attempt_telemetry(self, mid: str, task: Task, spawn_ts: str) -> None:
+        now = utc_now_iso()
+        role: Literal["validator", "worker"] = "validator" if task.type == "validate" else "worker"
+        provider = self.store.config.for_role(role).worker_provider.name
+        self.store.save_attempt_telemetry(
+            AttemptTelemetry(
+                project_id=self.project_id,
+                mission_id=mid,
+                node_id=task.id,
+                task_type="validate" if task.type == "validate" else "work",
+                spawn_ts=spawn_ts,
+                provider=provider,
+                queued_at=now,
+                dispatched_at=now,
+            )
+        )
+
+    def _finish_attempt_telemetry(
+        self,
+        mid: str,
+        task: Task,
+        spawn_ts: str,
+        handoff: NodeHandoff,
+        *,
+        error: str | None = None,
+    ) -> None:
+        self.store.update_attempt_telemetry(
+            self.project_id,
+            mid,
+            spawn_ts,
+            task.id,
+            completed_at=utc_now_iso(),
+            done=handoff.done,
+            passed=handoff.passed if isinstance(handoff, ValidateHandoff) else None,
+            request_attention=handoff.request_attention,
+            error=error,
         )
 
     def _dispatch_requests(
@@ -390,18 +419,14 @@ class MissionCoordinator:
             self.store.save_task_state(self.project_id, mid, task_state)
             if isinstance(handoff, ValidateHandoff):
                 for item in handoff.items:
-                    entry = contract_state.items.setdefault(
-                        item.item_id, ContractStateEntry()
-                    )
+                    entry = contract_state.items.setdefault(item.item_id, ContractStateEntry())
                     if item.passed:
                         entry.status = "passed"
                     elif entry.status != "passed":
                         entry.status = "failed"
                 self.store.save_contract_state(self.project_id, mid, contract_state)
                 if self._validate_failure_needs_attention(tl, task_state, task, handoff):
-                    attention.append(
-                        attn_factory.node_attention(mid, task, handoff)
-                    )
+                    attention.append(attn_factory.node_attention(mid, task, handoff))
 
         if handoff.request_attention:
             attention.append(attn_factory.node_attention(mid, task, handoff))
@@ -424,16 +449,20 @@ class MissionCoordinator:
             request_attention=False,
         )
 
-    def close_mission(self, mid: str) -> StepResult:
+    def close_mission(
+        self,
+        mid: str,
+        *,
+        deliverable_roots: list[str] | None = None,
+        force_terminal_review: bool = False,
+    ) -> StepResult:
         state = self.store.load_state(self.project_id)
         if not isinstance(state, MissionRunning):
             return StepResult.idle("close_mission requires mission_running")
         try:
             tl = self.store.load_task_list(self.project_id, mid)
         except FileNotFoundError:
-            self.store.save_state(
-                self.project_id, Failed(reason=f"tasks.json missing for {mid}")
-            )
+            self.store.save_state(self.project_id, Failed(reason=f"tasks.json missing for {mid}"))
             return StepResult.terminal("task_list missing")
 
         task_state = self.store.load_task_state(self.project_id, mid)
@@ -451,23 +480,23 @@ class MissionCoordinator:
                 f"mission has runnable task work ({task.id}); call advance_project first"
             )
 
-        return self._enter_terminal_review(mid)
+        if deliverable_roots is not None:
+            self.store.save_terminal_review_config(
+                self.project_id,
+                mid,
+                TerminalReviewConfig(deliverable_roots=deliverable_roots),
+            )
+        return self._enter_terminal_review(mid, force=force_terminal_review)
 
     # ------------------------------------------------------------------
     # Gates
     # ------------------------------------------------------------------
 
-    def _try_evaluate_a_gate(
-        self, tl: TaskList, task_state: TaskStateFile
-    ) -> "_GateEvent | None":
-        for gate in sorted(
-            (t for t in tl.tasks if t.type == "gate"), key=lambda t: t.id
-        ):
+    def _try_evaluate_a_gate(self, tl: TaskList, task_state: TaskStateFile) -> "_GateEvent | None":
+        for gate in sorted((t for t in tl.tasks if t.type == "gate"), key=lambda t: t.id):
             if task_state.status_of(gate.id) != "pending":
                 continue
-            if not all(
-                task_state.status_of(dep) == "cleared" for dep in gate.depends_on
-            ):
+            if not all(task_state.status_of(dep) == "cleared" for dep in gate.depends_on):
                 continue
             return _GateEvent(gate=gate, result=self._evaluate_gate(tl, gate))
         return None
@@ -495,21 +524,15 @@ class MissionCoordinator:
             if not expected:
                 continue
 
-            attempts = self.store.list_attempts(
-                self.project_id, mid, node_id=v_task_id
-            )
+            attempts = self.store.list_attempts(self.project_id, mid, node_id=v_task_id)
             if not attempts:
                 validator_verdicts[v_task_id] = {t: False for t in expected}
                 missing_items[v_task_id] = list(expected)
                 continue
             last = attempts[-1]
-            handoff = self.store.read_attempt(
-                self.project_id, mid, last.spawn_ts, v_task_id
-            )
+            handoff = self.store.read_attempt(self.project_id, mid, last.spawn_ts, v_task_id)
             attempt_paths[v_task_id] = str(
-                self.store.attempt_report_path(
-                    self.project_id, mid, last.spawn_ts, v_task_id
-                )
+                self.store.attempt_report_path(self.project_id, mid, last.spawn_ts, v_task_id)
             )
             if not isinstance(handoff, ValidateHandoff):
                 validator_verdicts[v_task_id] = {t: False for t in expected}
@@ -532,23 +555,16 @@ class MissionCoordinator:
         item_passed: dict[str, bool] = {}
         uncovered: list[str] = []
         for tgt in gate.targets:
-            covering = [
-                vid for vid, verds in validator_verdicts.items()
-                if tgt in verds
-            ]
+            covering = [vid for vid, verds in validator_verdicts.items() if tgt in verds]
             if not covering:
                 uncovered.append(tgt)
                 continue
-            item_passed[tgt] = all(
-                validator_verdicts[vid][tgt] for vid in covering
-            )
+            item_passed[tgt] = all(validator_verdicts[vid][tgt] for vid in covering)
 
         if uncovered:
             return _GateResult(
                 cleared=False,
-                reason=(
-                    f"no validator covered item(s): {', '.join(uncovered)}"
-                ),
+                reason=(f"no validator covered item(s): {', '.join(uncovered)}"),
                 failed_items=uncovered,
                 validator_verdicts=validator_verdicts,
                 attempt_paths=attempt_paths,
@@ -565,12 +581,11 @@ class MissionCoordinator:
         dissent_detail: list[str] = []
         for tgt in failed:
             dissenters = [
-                vid for vid, verds in validator_verdicts.items()
+                vid
+                for vid, verds in validator_verdicts.items()
                 if verds.get(tgt) is False and tgt not in missing_items.get(vid, [])
             ]
-            omitters = [
-                vid for vid, miss in missing_items.items() if tgt in miss
-            ]
+            omitters = [vid for vid, miss in missing_items.items() if tgt in miss]
             parts: list[str] = []
             if dissenters:
                 parts.append(f"dissent: {', '.join(dissenters)}")
@@ -625,9 +640,7 @@ class MissionCoordinator:
             if item.item_id in task.targets
         }
         targets_needing_attention = [
-            target
-            for target in task.targets
-            if returned.get(target) is not True
+            target for target in task.targets if returned.get(target) is not True
         ]
         if not targets_needing_attention and handoff.passed:
             return False
@@ -635,9 +648,7 @@ class MissionCoordinator:
             targets_needing_attention = list(task.targets)
 
         return any(
-            not self._has_pending_downstream_gate_covering(
-                tl, task_state, task.id, target
-            )
+            not self._has_pending_downstream_gate_covering(tl, task_state, task.id, target)
             for target in targets_needing_attention
         )
 
@@ -715,17 +726,71 @@ class MissionCoordinator:
     # Terminal review
     # ------------------------------------------------------------------
 
-    def _enter_terminal_review(self, mid: str) -> StepResult:
-        spawn_ts = utc_now_filesafe()
+    def _enter_terminal_review(self, mid: str, *, force: bool = False) -> StepResult:
+        config = self.store.load_terminal_review_config(self.project_id, mid)
+        input_fingerprint = self.store.terminal_review_input_fingerprint(
+            self.project_id, mid, config.deliverable_roots
+        )
+        previous = self.store.latest_terminal_review_metadata(self.project_id, mid)
+        if (
+            not force
+            and previous is not None
+            and previous.done is False
+            and previous.input_fingerprint == input_fingerprint
+        ):
+            self._raise_attention(
+                [
+                    attn_factory.terminal_review_conflict(
+                        mid,
+                        previous_spawn_ts=previous.spawn_ts,
+                        input_fingerprint=input_fingerprint,
+                    )
+                ]
+            )
+            return StepResult.attention_needed("terminal_review_conflict")
+
+        spawn_ts = self.store.allocate_terminal_review_spawn_ts(
+            self.project_id, mid, utc_now_filesafe()
+        )
+        self.store.save_terminal_review_metadata(
+            self.project_id,
+            mid,
+            TerminalReviewMetadata(
+                spawn_ts=spawn_ts,
+                input_fingerprint=input_fingerprint,
+                deliverable_roots=config.deliverable_roots,
+                forced=force,
+                started_at=utc_now_iso(),
+            ),
+        )
         try:
             report = self.terminal_reviewer.review(self.project_id, mid, spawn_ts)
         except Exception as exc:  # noqa: BLE001
+            self.store.update_terminal_review_metadata(
+                self.project_id,
+                mid,
+                spawn_ts,
+                completed_at=utc_now_iso(),
+                error=str(exc),
+            )
             self.store.save_state(
                 self.project_id,
                 Failed(reason=f"Terminal reviewer crashed: {exc}"),
             )
             return StepResult.terminal("terminal_review_crash")
         self.store.save_terminal_review(self.project_id, mid, spawn_ts, report)
+        self.store.update_terminal_review_metadata(
+            self.project_id,
+            mid,
+            spawn_ts,
+            completed_at=utc_now_iso(),
+            done=report.done,
+            gap_fingerprint=(
+                hashlib.sha256(report.report.strip().encode()).hexdigest()
+                if not report.done
+                else None
+            ),
+        )
         if report.done:
             self.store.seal_mission(
                 self.project_id,
@@ -781,19 +846,13 @@ class MissionCoordinator:
                     task.id,
                     handoff,
                 )
-                attention.extend(
-                    self._apply_handoff_collect(mid, task, handoff, spawn_ts)
-                )
+                attention.extend(self._apply_handoff_collect(mid, task, handoff, spawn_ts))
                 continue
             last = attempts[-1]
-            read_handoff = self.store.read_attempt(
-                self.project_id, mid, last.spawn_ts, task.id
-            )
+            read_handoff = self.store.read_attempt(self.project_id, mid, last.spawn_ts, task.id)
             if read_handoff is None:
                 continue
-            attention.extend(
-                self._apply_handoff_collect(mid, task, read_handoff, last.spawn_ts)
-            )
+            attention.extend(self._apply_handoff_collect(mid, task, read_handoff, last.spawn_ts))
         if not saw_running:
             return None
         if attention:

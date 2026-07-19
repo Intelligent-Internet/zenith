@@ -189,10 +189,31 @@ def terminal_review(
     )
 
 
+def terminal_review_conflict(
+    mission_id: str,
+    *,
+    previous_spawn_ts: str,
+    input_fingerprint: str,
+) -> AttentionItemInternal:
+    return AttentionItemInternal(
+        id=_new_id("terminal-review-conflict"),
+        kind="terminal_review_conflict",
+        mission_id=mission_id,
+        report=(
+            "Terminal review was not rerun because its observable inputs are unchanged.\n"
+            f"previous_review: {previous_spawn_ts}\n"
+            f"input_fingerprint: {input_fingerprint}\n\n"
+            "Patch the deliverable/workspace inputs, declare the correct deliverable_roots, "
+            "or explicitly force one retry when the prior reviewer failure was transient."
+        ),
+    )
+
+
 __all__ = [
     "node_failed",
     "node_attention",
     "gate_failed",
     "gate_checkpoint",
     "terminal_review",
+    "terminal_review_conflict",
 ]

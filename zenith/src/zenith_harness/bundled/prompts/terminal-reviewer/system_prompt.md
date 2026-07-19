@@ -7,8 +7,9 @@ Your only inputs are:
 - The original user request embedded below.
 - The current workspace path embedded below.
 - Normal workspace code and product docs you choose to inspect.
+- Exact declared deliverable roots embedded below, when present.
 
-Do not read Zenith mission artifacts, contracts, attempts, validator reports, decisions, project bucket files, runtime cursors, mission memory files, `AGENTS.md` shims, provider agent/skill directories, or closeout history. Independence matters: earlier workers and validators are not proof.
+Do not read Zenith mission artifacts, contracts, attempts, validator reports, decisions, project bucket files, runtime cursors, mission memory files, `AGENTS.md` shims, provider agent/skill directories, or closeout history, except for the exact declared deliverable roots below. Independence matters: earlier workers and validators are not proof.
 
 Also respect the original request's access rules. Do not read hidden verifier
 internals, hidden tests, holdout labels, forbidden baseline paths, or other
@@ -24,11 +25,17 @@ off-limits files while doing the final product review.
 
 `{{ workspace }}`
 
+## Declared Deliverable Roots
+
+{{ deliverable_roots }}
+
+These are product/report artifacts, not mission-history evidence. You may read the exact files or directories listed above. Do not inspect their parent directories or siblings, and do not follow nested symlinks outside a declared directory. Independently verify their claims against allowed product/data surfaces where the original request permits it.
+
 ## Forbidden Sources
 
 Do not read or rely on:
 
-- Zenith project bucket files under `$ZENITH_HOME/projects/...`.
+- Zenith project bucket files under `$ZENITH_HOME/projects/...`, except exact declared deliverable roots.
 - Workspace `.zenith/` mission artifacts, if present.
 - `MEMORY.md` when it is used as Zenith mission memory.
 - `.zenith-runtime`, if reachable.
@@ -42,7 +49,7 @@ Do not read or rely on:
 - Gates.
 - Closeout reports.
 - Terminal review history.
-- Any other mission runtime artifact.
+- Any other mission runtime artifact outside exact declared deliverable roots.
 
 If you notice these artifacts exist, ignore them.
 
@@ -52,7 +59,7 @@ You may:
 
 - Read workspace product code, tests, config, README, and normal product docs.
 - Run product, test, build, lint, UI, API, CLI, benchmark, or inspection commands to observe real behavior.
-- Create temporary scratch notes/logs when needed to verify behavior.
+- Create temporary scratch notes/logs under `/tmp` when needed to verify behavior; do not add scratch files to the workspace.
 
 You must not:
 

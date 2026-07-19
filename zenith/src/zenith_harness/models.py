@@ -11,6 +11,7 @@ Attempt filenames keep the `<ts>__<node_id>.json` token for on-disk continuity
 — `node_id` reads as task id. WorkHandoff/ValidateHandoff retain the
 `node_id` field for the same reason; an eventual rename is deferred.
 """
+
 from __future__ import annotations
 
 import re
@@ -66,16 +67,11 @@ class Task(BaseModel):
     )
     skill: str | None = Field(
         default=None,
-        description=(
-            "Skill procedure to load. Required for work/validate; must be null for "
-            "gate."
-        ),
+        description=("Skill procedure to load. Required for work/validate; must be null for gate."),
     )
     auto_merge: bool = Field(
         default=True,
-        description=(
-            "Legacy no-op. Work tasks always run directly in the project workspace."
-        ),
+        description=("Legacy no-op. Work tasks always run directly in the project workspace."),
     )
     depends_on: list[str] = Field(
         default_factory=list,
@@ -197,6 +193,7 @@ AttentionKind = Literal[
     "gate_failed",
     "gate_checkpoint",
     "terminal_review",
+    "terminal_review_conflict",
 ]
 
 
@@ -220,6 +217,7 @@ class AttentionItemInternal(AttentionItem):
     kind: AttentionKind
     mission_id: str
     node_id: str | None = None
+
 
 # ---------------------------------------------------------------------------
 # ProjectState (discriminated union)
@@ -347,6 +345,69 @@ class TerminalReviewHandoff(BaseModel):
     report: str = ""
 
 
+class RuntimeIdentity(BaseModel):
+    """Version control identity of the harness process that created a project."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: str
+    git_commit: str | None = None
+    git_dirty: bool | None = None
+    source_root: str | None = None
+
+
+class AttemptTelemetry(BaseModel):
+    """Best-effort execution metadata kept separate from agent-authored handoffs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str
+    mission_id: str
+    node_id: str
+    task_type: Literal["work", "validate"]
+    spawn_ts: str
+    provider: str | None = None
+    queued_at: str
+    dispatched_at: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    session_id: str | None = None
+    stop_reason: str | None = None
+    exit_code: int | None = None
+    error: str | None = None
+    done: bool | None = None
+    passed: bool | None = None
+    request_attention: bool | None = None
+
+
+class TerminalReviewConfig(BaseModel):
+    """Explicit product-artifact inputs allowed during independent closure review."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    deliverable_roots: list[str] = Field(default_factory=list)
+
+
+class TerminalReviewMetadata(BaseModel):
+    """Runtime-owned review binding and execution metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    spawn_ts: str
+    input_fingerprint: str
+    deliverable_roots: list[str] = Field(default_factory=list)
+    forced: bool = False
+    provider: str | None = None
+    started_at: str
+    completed_at: str | None = None
+    session_id: str | None = None
+    stop_reason: str | None = None
+    exit_code: int | None = None
+    error: str | None = None
+    done: bool | None = None
+    gap_fingerprint: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # On-disk runtime cursors (HARNESS bucket; orchestrator-internal)
 # ---------------------------------------------------------------------------
@@ -409,6 +470,7 @@ class ProjectRecord(BaseModel):
     workspace_dir: str
     created_at: str
     current_mission_id: str | None = None
+    runtime_identity: RuntimeIdentity | None = None
 
 
 class AttentionFile(BaseModel):
@@ -462,6 +524,10 @@ __all__ = [
     "ValidationItem",
     "ValidateHandoff",
     "TerminalReviewHandoff",
+    "RuntimeIdentity",
+    "AttemptTelemetry",
+    "TerminalReviewConfig",
+    "TerminalReviewMetadata",
     "TaskStateEntry",
     "TaskStateFile",
     "ContractStateEntry",

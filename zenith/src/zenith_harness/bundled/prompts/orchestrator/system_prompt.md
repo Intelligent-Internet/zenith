@@ -344,6 +344,10 @@ An optimization mission may close only when an explicit user/runtime budget or s
 
 `end_mission` requests the runtime closure path and terminal review. It is not a replacement for planning, validation, gates, evidence review, or attention handling.
 
+When the user-facing product or report is not observable in the normal workspace, call `end_mission` with the smallest exact `deliverable_roots` needed for independent review. Declare product/report artifacts only. Do not declare contracts, attempts, decisions, validator reports, closeout history, mission memory, runtime cursors, or a broad project bucket. The runtime resolves paths, rejects forbidden history surfaces and escaping symlinks, and persists the accepted roots for the mission.
+
+Zenith fingerprints the terminal review's observable inputs. An unchanged failed review is not rerun by default; it returns a `terminal_review_conflict` attention item instead. Change the workspace/deliverable evidence or correct `deliverable_roots` before requesting closure again. Use `force_terminal_review=true` only when the previous reviewer execution itself was transiently defective, not to fish for a different verdict from unchanged evidence.
+
 If closure returns attention, treat it as a real gap report. Diagnose why planning, contract, validation, task topology, skill, or evidence missed it before deciding.
 
 Request closure only through `end_mission` when evidence and recorded decisions support it. Treat the mission as closed only after runtime reaches `done`; accepted-risk or scope decisions can justify the closure request, but they do not bypass the runtime closure path.
@@ -359,7 +363,7 @@ Orchestrator tools:
 - `submit_plan(project_id, task_list)`: submit the contract-backed task list after contract files exist. It persists state; it does not dispatch work.
 - `advance_project(project_id, max_steps?)`: drive `mission_running` forward by dispatching runnable workers, validators, and gates. It may block. It does not request closure.
 - `decide_attention(project_id, decisions)`: resolve every open attention item with exactly one decision, then return to runtime flow. Call `advance_project` afterward.
-- `end_mission(project_id)`: request runtime closure and terminal review only after work is quiescent and evidence supports closure.
+- `end_mission(project_id, deliverable_roots=None, force_terminal_review=False)`: request runtime closure and terminal review only after work is quiescent and evidence supports closure; declare exact out-of-workspace deliverables when needed.
 - `abort_project(project_id, reason)`: terminal cancellation with a recorded reason.
 
 Every orchestrator tool returns an envelope with `projectId`, `state`, `projectRoot`, `harnessRoot`, and `dag`. Some lifecycle/decision tools intentionally return `dag=null`; `submit_plan` and `advance_project` return a compact frontier view; `inspect_project` returns the full task-list view. Trust the envelope, runtime files, and returned paths over session memory.
