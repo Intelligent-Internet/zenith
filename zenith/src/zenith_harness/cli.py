@@ -8,7 +8,7 @@ from pathlib import Path
 import click
 
 from .assets import AssetLoader, iter_skill_directories
-from .config import HarnessConfig
+from .config import VALID_REASONING_EFFORTS, HarnessConfig
 from .envelope import render_task_list
 from .providers import (
     ProviderDefinition,
@@ -74,6 +74,9 @@ def cli() -> None:
 @click.option("--validator-acp-command", default=None)
 @click.option("--terminal-reviewer-provider", type=click.Choice(provider_names_for_role("worker")), default=None)
 @click.option("--terminal-reviewer-acp-command", default=None)
+@click.option("--worker-reasoning-effort", type=click.Choice(VALID_REASONING_EFFORTS), default=None)
+@click.option("--validator-reasoning-effort", type=click.Choice(VALID_REASONING_EFFORTS), default=None)
+@click.option("--terminal-reviewer-reasoning-effort", type=click.Choice(VALID_REASONING_EFFORTS), default=None)
 @click.option("--zenith-home", type=click.Path(), default=None)
 @click.option("--workspace-dir", "workspace_dir", type=click.Path(exists=True), default=".")
 def init(
@@ -85,6 +88,9 @@ def init(
     validator_acp_command: str | None,
     terminal_reviewer_provider: str | None,
     terminal_reviewer_acp_command: str | None,
+    worker_reasoning_effort: str | None,
+    validator_reasoning_effort: str | None,
+    terminal_reviewer_reasoning_effort: str | None,
     zenith_home: str | None,
     workspace_dir: str,
 ) -> None:
@@ -112,7 +118,21 @@ def init(
 
     # 1) MCP / Codex config
     storage_env = _storage_env(zenith_home=zenith_home, workspace=workspace, selection=selection)
-    _write_bootstrap_config(workspace, selection, storage_env)
+    # Flags are sugar for the ZENITH_*_REASONING_EFFORT env vars and win over
+    # valid inherited shell settings. An invalid value already in the
+    # environment still fails fast at discover() above — flags override
+    # settings, they don't mask broken ones (the same validation would raise
+    # at server launch anyway).
+    effort_env = {
+        var: value
+        for var, value in (
+            ("ZENITH_WORKER_REASONING_EFFORT", worker_reasoning_effort),
+            ("ZENITH_VALIDATOR_REASONING_EFFORT", validator_reasoning_effort),
+            ("ZENITH_TERMINAL_REVIEWER_REASONING_EFFORT", terminal_reviewer_reasoning_effort),
+        )
+        if value
+    }
+    _write_bootstrap_config(workspace, selection, storage_env, effort_env)
 
     # 2) Per-provider agents + orchestrator prompt
     for provider in selection.providers():
@@ -356,9 +376,10 @@ def _write_bootstrap_config(
     workspace: Path,
     selection: ProviderSelection,
     storage_env: dict[str, str],
+    cli_env: dict[str, str],
 ) -> None:
     fmt = selection.orchestrator.config_format
-    env = {**selection.env(), **storage_env, **_forwarded_runtime_env()}
+    env = {**selection.env(), **storage_env, **_forwarded_runtime_env(), **cli_env}
     server_args = _mcp_server_args()
     if fmt == "mcp_json":
         path = workspace / ".mcp.json"
