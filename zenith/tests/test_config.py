@@ -82,13 +82,13 @@ def test_discover_reasoning_effort_per_role(
     monkeypatch.delenv("ZENITH_PROJECT_BUCKET_DIR", raising=False)
     monkeypatch.setenv("ZENITH_WORKER_REASONING_EFFORT", "high")
     monkeypatch.setenv("ZENITH_VALIDATOR_REASONING_EFFORT", "medium")
-    monkeypatch.setenv("ZENITH_TERMINAL_REVIEWER_REASONING_EFFORT", "xhigh")
+    monkeypatch.setenv("ZENITH_TERMINAL_REVIEWER_REASONING_EFFORT", "max")
 
     config = HarnessConfig.discover()
 
     assert config.worker_reasoning_effort == "high"
     assert config.validator_reasoning_effort == "medium"
-    assert config.terminal_reviewer_reasoning_effort == "xhigh"
+    assert config.terminal_reviewer_reasoning_effort == "max"
 
 
 def test_discover_invalid_reasoning_effort_rejected(

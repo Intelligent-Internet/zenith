@@ -15,8 +15,12 @@ from .providers import (
 DEFAULT_MAX_PARALLEL_NODES = 4
 
 # codex-acp `model_reasoning_effort` values. Also a safety allowlist: the
-# resolved value is spliced into a shell command line by acp_runner.
-VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+# resolved value is spliced into a shell command line by acp_runner. Codex's
+# "ultra" is deliberately excluded: it is not a reasoning tier (codex
+# downgrades the request to "max" on the wire) but a switch to proactive
+# multi-agent mode — a lane spawning its own agent swarm inside a harness
+# that already orchestrates and validates per-lane work.
+VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
 
 
 def _bundled_dir() -> Path:
