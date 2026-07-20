@@ -444,6 +444,41 @@ class TestTerminalReviews:
         store.save_terminal_review_config("p1", "mission-001", config)
         assert store.load_terminal_review_config("p1", "mission-001") == config
 
+    def test_declared_roots_accept_aliased_allowed_base_ancestors(
+        self, config: HarnessConfig, tmp_path: Path
+    ) -> None:
+        physical_root = tmp_path / "physical"
+        physical_root.mkdir()
+        aliased_root = tmp_path / "aliased"
+        aliased_root.symlink_to(physical_root, target_is_directory=True)
+        harness_home = aliased_root / "harness-home"
+        aliased_store = ProjectStore(
+            replace(
+                config,
+                harness_home=harness_home,
+                projects_dir=harness_home / "projects",
+            )
+        )
+        workspace = aliased_root / "workspace"
+        workspace.mkdir()
+        aliased_store.create_project("brief", workspace, project_id="p1")
+
+        product = workspace / "product.md"
+        product.write_text("product", encoding="utf-8")
+        report = (
+            aliased_store.mission_dir("p1", "mission-001")
+            / "evidence"
+            / "report.md"
+        )
+        report.parent.mkdir(parents=True)
+        report.write_text("report", encoding="utf-8")
+
+        assert aliased_store.resolve_terminal_review_roots(
+            "p1",
+            "mission-001",
+            [str(report), str(product), str(report.resolve()), str(product.resolve())],
+        ) == sorted([str(report.resolve()), str(product.resolve())])
+
     def test_declared_roots_reject_process_and_control_surfaces(
         self, store: ProjectStore, workspace: Path
     ) -> None:

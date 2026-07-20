@@ -84,6 +84,16 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
     return True
 
 
+def _symlink_components(path: Path) -> list[Path]:
+    components: list[Path] = []
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            components.append(current)
+    return components
+
+
 def attempt_to_markdown(handoff: WorkHandoff | ValidateHandoff) -> str:
     lines = ["---"]
     lines.append(f"node_id: {handoff.node_id}")
@@ -668,29 +678,72 @@ class ProjectStore:
         for raw in roots:
             if any(ord(char) < 32 or ord(char) == 127 for char in raw):
                 raise ValueError("terminal-review deliverable path contains control characters")
-            candidate = Path(raw).expanduser()
-            if not candidate.is_absolute():
-                candidate = workspace / candidate
-            lexical = Path(os.path.abspath(candidate))
+            lexical_candidate = Path(raw).expanduser()
+            if not lexical_candidate.is_absolute():
+                lexical_candidate = workspace / lexical_candidate
+            lexical_candidate = Path(os.path.abspath(lexical_candidate))
             try:
-                target = candidate.resolve(strict=True)
+                candidate = lexical_candidate.resolve(strict=True)
             except FileNotFoundError as exc:
                 raise ValueError(f"terminal-review deliverable does not exist: {raw}") from exc
             except (OSError, RuntimeError) as exc:
                 raise ValueError(
                     f"terminal-review deliverable cannot be resolved safely: {raw}"
                 ) from exc
-            if any(ord(char) < 32 or ord(char) == 127 for char in str(target)):
+            if any(ord(char) < 32 or ord(char) == 127 for char in str(candidate)):
                 raise ValueError("terminal-review deliverable path contains control characters")
 
-            in_evidence = _is_relative_to(lexical, evidence) and _is_relative_to(
-                target, evidence
-            )
+            # Ancestor aliases outside an allowed surface are path spellings, such
+            # as macOS /var -> /private/var. A symlink originating inside an
+            # authorization or control surface must not cross that boundary.
+            for link in _symlink_components(lexical_candidate):
+                try:
+                    link_location = link.parent.resolve(strict=True) / link.name
+                    link_target = link.resolve(strict=True)
+                except FileNotFoundError as exc:
+                    raise ValueError(
+                        f"terminal-review deliverable contains a broken symlink: {link}"
+                    ) from exc
+                except (OSError, RuntimeError) as exc:
+                    raise ValueError(
+                        f"terminal-review deliverable contains an unsafe symlink: {link}"
+                    ) from exc
+                in_forbidden_workspace = any(
+                    link_location == item or _is_relative_to(link_location, item)
+                    for item in forbidden_workspace[1:]
+                )
+                in_project_control = _is_relative_to(
+                    link_location, projects
+                ) and not _is_relative_to(link_location, evidence)
+                crosses_workspace_surface = (
+                    _is_relative_to(link_location, workspace)
+                    and not _is_relative_to(link_location, projects)
+                    and not (
+                        _is_relative_to(link_target, workspace)
+                        and not _is_relative_to(link_target, projects)
+                    )
+                )
+                crosses_mission_surface = _is_relative_to(
+                    link_location, mission
+                ) and not (
+                    _is_relative_to(link_location, evidence)
+                    and _is_relative_to(link_target, evidence)
+                )
+                if (
+                    in_forbidden_workspace
+                    or in_project_control
+                    or crosses_mission_surface
+                    or crosses_workspace_surface
+                ):
+                    raise ValueError(
+                        "terminal-review deliverable must be inside the normal workspace "
+                        f"product surface or current mission evidence subtree: {raw}"
+                    )
+
+            in_evidence = _is_relative_to(candidate, evidence)
             in_workspace = (
-                _is_relative_to(lexical, workspace)
-                and not _is_relative_to(lexical, projects)
-                and _is_relative_to(target, workspace)
-                and not _is_relative_to(target, projects)
+                _is_relative_to(candidate, workspace)
+                and not _is_relative_to(candidate, projects)
             )
             if not (in_evidence or in_workspace):
                 raise ValueError(
@@ -700,16 +753,16 @@ class ProjectStore:
             if in_workspace:
                 for item in forbidden_workspace:
                     if (
-                        target == item
-                        or _is_relative_to(target, item)
-                        or (target.is_dir() and _is_relative_to(item, target))
+                        candidate == item
+                        or _is_relative_to(candidate, item)
+                        or (candidate.is_dir() and _is_relative_to(item, candidate))
                     ):
                         raise ValueError(
                             "terminal-review deliverable is a forbidden workspace "
                             f"artifact: {raw}"
                         )
-            if target.is_dir():
-                for nested in target.rglob("*"):
+            if candidate.is_dir():
+                for nested in candidate.rglob("*"):
                     if not nested.is_symlink():
                         continue
                     try:
@@ -723,12 +776,12 @@ class ProjectStore:
                             "terminal-review deliverable contains an unsafe symlink: "
                             f"{nested}"
                         ) from exc
-                    if not _is_relative_to(link_target, target):
+                    if not _is_relative_to(link_target, candidate):
                         raise ValueError(
                             "terminal-review deliverable contains a symlink outside its "
                             f"declared root: {nested}"
                         )
-            value = str(target)
+            value = str(candidate)
             if value not in resolved:
                 resolved.append(value)
         return sorted(resolved)

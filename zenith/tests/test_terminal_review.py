@@ -4,7 +4,7 @@ See docs/v5/10-implementation-plan.md §2 Phase 7.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -295,6 +295,61 @@ class TestDeclaredRootClosure:
             for path, sentinel in process_history.items():
                 assert str(path.resolve()) not in reviewer_input.prompt
                 assert sentinel not in reviewer_input.prompt
+
+    def test_aliased_allowed_bases_are_canonicalized_on_retry(
+        self, config: HarnessConfig, tmp_path: Path
+    ) -> None:
+        physical_root = tmp_path / "physical"
+        physical_root.mkdir()
+        aliased_root = tmp_path / "aliased"
+        aliased_root.symlink_to(physical_root, target_is_directory=True)
+        harness_home = aliased_root / "harness-home"
+        aliased_config = replace(
+            config,
+            harness_home=harness_home,
+            projects_dir=harness_home / "projects",
+        )
+        workspace = aliased_root / "workspace"
+        workspace.mkdir()
+        report_content = "release-status: complete\n"
+        reviewer = _ScriptedRecordingReviewer(
+            aliased_config,
+            expected_content=report_content,
+        )
+        controller = ProjectController(
+            aliased_config, MockDispatcher(_responder), reviewer
+        )
+        pid = _start_and_seed_contract(controller, workspace)
+        _advance_to_closure(controller, pid)
+
+        report = (
+            controller.store.mission_dir(pid, "mission-001")
+            / "evidence"
+            / "final"
+            / "report.md"
+        )
+        report.parent.mkdir(parents=True)
+        report.write_text(report_content, encoding="utf-8")
+        reviewer.expected_report = report
+        product = workspace / "product.md"
+        product.write_text("product", encoding="utf-8")
+
+        first = controller.end_mission(pid, None)
+        assert first.state.state == "attention_needed"
+        assert reviewer.inputs[0].deliverable_roots == []
+        _resume_after_terminal_gap(controller, pid)
+
+        second = controller.end_mission(pid, [str(product), str(report)])
+        expected_roots = sorted([str(product.resolve()), str(report.resolve())])
+        assert second.state.state == "done"
+        assert reviewer.inputs[1].deliverable_roots == expected_roots
+        assert reviewer.inputs[1].contents_read == {
+            str(product.resolve()): "product",
+            str(report.resolve()): report_content,
+        }
+        assert controller.store.load_terminal_review_config(
+            pid, "mission-001"
+        ).deliverable_roots == expected_roots
 
     def test_none_clear_and_replace_persist_across_failed_review_retries(
         self, config: HarnessConfig, workspace: Path
