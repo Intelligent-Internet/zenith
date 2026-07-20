@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import tomllib
 from pathlib import Path
@@ -35,6 +36,16 @@ def _expected_mcp_server_args() -> list[str]:
         "--mode",
         "orchestrator",
     ]
+
+
+def _tree_snapshot(root: Path) -> dict[str, tuple[str, int, bytes]]:
+    snapshot: dict[str, tuple[str, int, bytes]] = {}
+    for path in (root, *sorted(root.rglob("*"))):
+        relative = str(path.relative_to(root))
+        kind = "directory" if path.is_dir() else "file"
+        content = b"" if path.is_dir() else path.read_bytes()
+        snapshot[relative] = (kind, stat.S_IMODE(path.stat().st_mode), content)
+    return snapshot
 
 
 class TestInit:
@@ -395,6 +406,51 @@ class TestUserScopeInit:
         assert rerun.exit_code == 0, rerun.output
         assert config_path.read_bytes() == first
 
+    def test_codex_replaces_valid_managed_block_by_line_and_preserves_mode(
+        self,
+        runner: CliRunner,
+        user_home: Path,
+        env: dict[str, str],
+    ) -> None:
+        codex_root = user_home / ".codex"
+        codex_root.mkdir()
+        config_path = codex_root / "config.toml"
+        config_path.write_text(
+            'model = "user-model"\n'
+            "\n"
+            "[features]\n"
+            "memories = false\n"
+            "\n"
+            "  # BEGIN zenith  \n"
+            "[mcp_servers.zenith]\n"
+            'command = "old-zenith"\n'
+            "\n"
+            "[mcp_servers.zenith.env]\n"
+            'OLD = "value"\n'
+            "\t# END zenith\t\n"
+            "\n"
+            "[mcp_servers.after]\n"
+            'command = "after"\n'
+        )
+        config_path.chmod(0o640)
+
+        result = runner.invoke(cli, ["init", "--scope", "user", "--agent", "codex"])
+        assert result.exit_code == 0, result.output
+        first = config_path.read_bytes()
+        config = tomllib.loads(first.decode())
+        assert config["model"] == "user-model"
+        assert config["features"]["memories"] is False
+        assert config["mcp_servers"]["zenith"]["command"] == "uv"
+        assert config["mcp_servers"]["after"]["command"] == "after"
+        assert first.count(b"# BEGIN zenith") == 1
+        assert first.count(b"# END zenith") == 1
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o640
+
+        rerun = runner.invoke(cli, ["init", "--scope", "user", "--agent", "codex"])
+        assert rerun.exit_code == 0, rerun.output
+        assert config_path.read_bytes() == first
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o640
+
     @pytest.mark.parametrize(
         "zenith_header, env_header",
         [
@@ -414,50 +470,121 @@ class TestUserScopeInit:
         codex_root.mkdir()
         config_path = codex_root / "config.toml"
         config_path.write_text(
+            'title = "contains # BEGIN zenith but is not a boundary"\n'
+            "# # END zenith is part of a longer comment\n\n"
             '[mcp_servers.before]\ncommand = "before"\n\n'
+            'marker_text = "prefix # END zenith suffix"\n\n'
             f'{zenith_header}\ncommand = "old"\n\n'
             f'{env_header}\nOLD = "value"\n\n'
             '[mcp_servers.after]\ncommand = "after"\n'
         )
+        config_path.chmod(0o600)
 
         result = runner.invoke(cli, ["init", "--scope", "user", "--agent", "codex"])
         assert result.exit_code == 0, result.output
         text = config_path.read_text()
         config = tomllib.loads(text)
+        assert config["title"] == "contains # BEGIN zenith but is not a boundary"
         assert config["mcp_servers"]["before"]["command"] == "before"
+        assert config["mcp_servers"]["before"]["marker_text"] == "prefix # END zenith suffix"
         assert config["mcp_servers"]["after"]["command"] == "after"
         assert config["mcp_servers"]["zenith"]["command"] == "uv"
         assert text.count("[mcp_servers.zenith]") == 1
+        assert "# # END zenith is part of a longer comment" in text
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
 
-    @pytest.mark.parametrize(
-        "content, message",
-        [
-            ("not = [valid\n", "invalid Codex config"),
-            ("# BEGIN zenith\n", "incomplete Zenith managed block"),
-            ("# END zenith\n", "incomplete Zenith managed block"),
-        ],
-    )
-    def test_codex_invalid_config_does_not_mutate_assets(
+        first = config_path.read_bytes()
+        rerun = runner.invoke(cli, ["init", "--scope", "user", "--agent", "codex"])
+        assert rerun.exit_code == 0, rerun.output
+        assert config_path.read_bytes() == first
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+
+    def test_codex_invalid_toml_does_not_mutate_assets(
         self,
         runner: CliRunner,
         user_home: Path,
         env: dict[str, str],
         monkeypatch: pytest.MonkeyPatch,
-        content: str,
-        message: str,
     ) -> None:
         codex_root = user_home / ".codex"
         codex_root.mkdir()
         config_path = codex_root / "config.toml"
+        content = "not = [valid\n"
         config_path.write_text(content)
         monkeypatch.setenv("CODEX_HOME", str(codex_root))
 
         result = runner.invoke(cli, ["init", "--scope", "user", "--agent", "codex"])
         assert result.exit_code != 0
-        assert message in result.output
+        assert "invalid Codex config" in result.output
         assert config_path.read_text() == content
         assert not (codex_root / "skills").exists()
         assert not (codex_root / "agents").exists()
+
+    @pytest.mark.parametrize(
+        "markers",
+        [
+            pytest.param(("# BEGIN zenith",), id="begin-only"),
+            pytest.param(("# END zenith",), id="end-only"),
+            pytest.param(("# END zenith", "# BEGIN zenith"), id="reversed"),
+            pytest.param(
+                ("# BEGIN zenith", "# BEGIN zenith", "# END zenith"),
+                id="duplicate-begin",
+            ),
+            pytest.param(
+                ("# BEGIN zenith", "# END zenith", "# END zenith"),
+                id="duplicate-end",
+            ),
+            pytest.param(
+                ("# BEGIN zenith", "# END zenith", "# BEGIN zenith", "# END zenith"),
+                id="two-blocks",
+            ),
+            pytest.param(
+                ("# BEGIN zenith", "# BEGIN zenith", "# END zenith", "# END zenith"),
+                id="nested",
+            ),
+            pytest.param(
+                (
+                    "# BEGIN zenith",
+                    "# BEGIN zenith",
+                    "# END zenith",
+                    "# BEGIN zenith",
+                    "# END zenith",
+                    "# END zenith",
+                ),
+                id="overlapping",
+            ),
+        ],
+    )
+    def test_codex_rejects_malformed_managed_blocks_without_user_tree_mutation(
+        self,
+        runner: CliRunner,
+        user_home: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+        markers: tuple[str, ...],
+    ) -> None:
+        codex_root = user_home / ".codex"
+        codex_root.mkdir()
+        config_path = codex_root / "config.toml"
+        content = 'theme = "dark"\n' + "\n".join(markers) + "\n# keep me\n"
+        config_path.write_text(content)
+        config_path.chmod(0o640)
+        monkeypatch.setenv("CODEX_HOME", str(codex_root))
+        existing_agent = codex_root / "agents" / "personal.toml"
+        existing_agent.parent.mkdir()
+        existing_agent.write_text('name = "personal"\n')
+        existing_skill = codex_root / "skills" / "personal" / "SKILL.md"
+        existing_skill.parent.mkdir(parents=True)
+        existing_skill.write_text("personal skill\n")
+        shared_skill = user_home / ".agents" / "skills" / "personal" / "SKILL.md"
+        shared_skill.parent.mkdir(parents=True)
+        shared_skill.write_text("shared personal skill\n")
+        before = _tree_snapshot(user_home)
+
+        result = runner.invoke(cli, ["init", "--scope", "user", "--agent", "codex"])
+        assert result.exit_code != 0
+        assert "malformed Zenith managed block" in result.output
+        assert _tree_snapshot(user_home) == before
 
     @pytest.mark.parametrize("order", [("claude", "codex"), ("codex", "claude")])
     def test_claude_and_codex_user_installs_coexist(

@@ -509,6 +509,31 @@ def _strip_toml_tables(text: str, table: tuple[str, ...]) -> str:
     return "".join(kept).rstrip()
 
 
+def _parse_managed_block_lines(
+    text: str,
+    start: str,
+    end: str,
+) -> tuple[list[str], tuple[int, int] | None]:
+    lines = text.splitlines(keepends=True)
+    start_lines: list[int] = []
+    end_lines: list[int] = []
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == start:
+            start_lines.append(index)
+        elif stripped == end:
+            end_lines.append(index)
+
+    if not start_lines and not end_lines:
+        return lines, None
+    if len(start_lines) != 1 or len(end_lines) != 1 or start_lines[0] >= end_lines[0]:
+        raise ValueError(
+            "malformed Zenith managed block: expected no markers or one forward pair; "
+            f"found {len(start_lines)} begin and {len(end_lines)} end markers"
+        )
+    return lines, (start_lines[0], end_lines[0])
+
+
 def _write_codex_user_config(
     path: Path,
     selection: ProviderSelection,
@@ -522,11 +547,11 @@ def _write_codex_user_config(
 
     start = "# BEGIN zenith"
     end = "# END zenith"
-    if (start in existing) != (end in existing):
-        raise click.ClickException(
-            f"Cannot update Codex config {path}: incomplete Zenith managed block"
-        )
-    if start not in existing:
+    try:
+        existing_lines, managed_span = _parse_managed_block_lines(existing, start, end)
+    except ValueError as exc:
+        raise click.ClickException(f"Cannot update Codex config {path}: {exc}") from exc
+    if managed_span is None:
         existing = _strip_toml_tables(existing, ("mcp_servers", "zenith"))
 
     server = _user_server_config(selection, storage_env)
@@ -545,7 +570,18 @@ def _write_codex_user_config(
         f"{env_lines}\n"
         f"{end}\n"
     )
-    updated = _replace_managed_block_text(existing, start, end, block)
+    if managed_span is None:
+        updated = existing.rstrip()
+        if updated:
+            updated += "\n\n"
+        updated += block.rstrip() + "\n"
+    else:
+        start_line, end_line = managed_span
+        updated = (
+            "".join(existing_lines[:start_line])
+            + block
+            + "".join(existing_lines[end_line + 1 :])
+        )
     try:
         tomllib.loads(updated)
     except tomllib.TOMLDecodeError as exc:
