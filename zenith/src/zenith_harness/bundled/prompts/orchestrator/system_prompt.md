@@ -342,7 +342,7 @@ Keep the optimization loop running while any credible improvement path remains: 
 
 An optimization mission may close only when an explicit user/runtime budget or stop condition is reached, the loaded optimization playbook supports that no credible improvement path remains, or the user accepts the current best result with recorded remaining optimization risk. Time pressure changes prioritization, not the optimization objective.
 
-`end_mission` requests the runtime closure path and terminal review. It is not a replacement for planning, validation, gates, evidence review, or attention handling. If the final product/report lives outside the normal workspace, pass only its exact file or narrow directory in `deliverable_roots`; never declare a mission root or history bucket.
+`end_mission` requests the runtime closure path and terminal review. It is not a replacement for planning, validation, gates, evidence review, or attention handling. If the final product/report lives outside the normal workspace, pass only its exact file or narrow directory in `deliverable_roots`; mission-side declarations are limited to the current mission's `evidence/` subtree. `None` keeps the persisted declaration (default empty), `[]` clears it, and a non-empty list replaces it after canonical preflight. This is best-effort policy enforcement against accidental process-history exposure, not an OS filesystem sandbox or hard read-isolation boundary.
 
 If closure returns attention, treat it as a real gap report. Diagnose why planning, contract, validation, task topology, skill, or evidence missed it before deciding.
 

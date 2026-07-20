@@ -652,22 +652,17 @@ class ProjectStore:
     ) -> list[str]:
         workspace = self.workspace_dir(project_id).resolve()
         mission = self.mission_dir(project_id, mission_id).resolve()
-        runtime = self.zenith_runtime_dir(project_id).resolve()
-        forbidden = [
-            (runtime, "mission"),
-            (self.zenith_dir(project_id).resolve() / "decisions", "mission"),
-            (self.zenith_dir(project_id).resolve() / "MEMORY.md", "mission"),
-            (mission / "contract", "mission"),
-            (mission / "attempts", "mission"),
-            (mission / "terminal-reviews", "mission"),
-            (mission / "closeout.md", "mission"),
-            (workspace / ".git", "workspace"),
-            (workspace / ".zenith", "workspace"),
-            (workspace / ".zenith-runtime", "workspace"),
-            (workspace / ".agents", "workspace"),
-            (workspace / ".claude", "workspace"),
-            (workspace / ".codex", "workspace"),
-            (workspace / "AGENTS.md", "workspace"),
+        evidence = mission / "evidence"
+        projects = self.config.projects_dir.resolve()
+        forbidden_workspace = [
+            projects,
+            workspace / ".git",
+            workspace / ".zenith",
+            workspace / ".zenith-runtime",
+            workspace / ".agents",
+            workspace / ".claude",
+            workspace / ".codex",
+            workspace / "AGENTS.md",
         ]
         resolved: list[str] = []
         for raw in roots:
@@ -676,24 +671,43 @@ class ProjectStore:
             candidate = Path(raw).expanduser()
             if not candidate.is_absolute():
                 candidate = workspace / candidate
+            lexical = Path(os.path.abspath(candidate))
             try:
                 target = candidate.resolve(strict=True)
             except FileNotFoundError as exc:
                 raise ValueError(f"terminal-review deliverable does not exist: {raw}") from exc
-            if not (_is_relative_to(target, workspace) or _is_relative_to(target, mission)):
+            except (OSError, RuntimeError) as exc:
                 raise ValueError(
-                    "terminal-review deliverable must be inside the workspace or current "
-                    f"mission: {raw}"
+                    f"terminal-review deliverable cannot be resolved safely: {raw}"
+                ) from exc
+            if any(ord(char) < 32 or ord(char) == 127 for char in str(target)):
+                raise ValueError("terminal-review deliverable path contains control characters")
+
+            in_evidence = _is_relative_to(lexical, evidence) and _is_relative_to(
+                target, evidence
+            )
+            in_workspace = (
+                _is_relative_to(lexical, workspace)
+                and not _is_relative_to(lexical, projects)
+                and _is_relative_to(target, workspace)
+                and not _is_relative_to(target, projects)
+            )
+            if not (in_evidence or in_workspace):
+                raise ValueError(
+                    "terminal-review deliverable must be inside the normal workspace "
+                    f"product surface or current mission evidence subtree: {raw}"
                 )
-            for item, label in forbidden:
-                if (
-                    target == item
-                    or _is_relative_to(target, item)
-                    or (target.is_dir() and _is_relative_to(item, target))
-                ):
-                    raise ValueError(
-                        f"terminal-review deliverable is a forbidden {label} artifact: {raw}"
-                    )
+            if in_workspace:
+                for item in forbidden_workspace:
+                    if (
+                        target == item
+                        or _is_relative_to(target, item)
+                        or (target.is_dir() and _is_relative_to(item, target))
+                    ):
+                        raise ValueError(
+                            "terminal-review deliverable is a forbidden workspace "
+                            f"artifact: {raw}"
+                        )
             if target.is_dir():
                 for nested in target.rglob("*"):
                     if not nested.is_symlink():
@@ -703,6 +717,11 @@ class ProjectStore:
                     except FileNotFoundError as exc:
                         raise ValueError(
                             f"terminal-review deliverable contains a broken symlink: {nested}"
+                        ) from exc
+                    except (OSError, RuntimeError) as exc:
+                        raise ValueError(
+                            "terminal-review deliverable contains an unsafe symlink: "
+                            f"{nested}"
                         ) from exc
                     if not _is_relative_to(link_target, target):
                         raise ValueError(

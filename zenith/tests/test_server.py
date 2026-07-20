@@ -180,10 +180,10 @@ async def test_orchestrator_end_to_end_in_process(
     config: HarnessConfig, workspace: Path
 ) -> None:
     def responder(req):
-        if req.node.type == "work":
-            return WorkHandoff(node_id=req.node.id, done=True, report="ok")
+        if req.task.type == "work":
+            return WorkHandoff(node_id=req.task.id, done=True, report="ok")
         return ValidateHandoff(
-            node_id=req.node.id,
+            node_id=req.task.id,
             done=True,
             report="audited",
             items=[ValidationItem(item_id="VAL-001", passed=True)],
@@ -224,6 +224,25 @@ async def test_orchestrator_end_to_end_in_process(
     )
     await server.call_tool("advance_project", {"project_id": pid})
     await server.call_tool("inspect_project", {"project_id": pid})
+    report = (
+        controller.store.mission_dir(pid, "mission-001")
+        / "evidence"
+        / "final"
+        / "report.md"
+    )
+    report.parent.mkdir(parents=True)
+    report.write_text("final report", encoding="utf-8")
+    await server.call_tool(
+        "end_mission",
+        {"project_id": pid, "deliverable_roots": [str(report)]},
+    )
+    state = controller.store.load_state(pid)
+    assert state is not None
+    assert state.state == "done"
+    review_config = controller.store.load_terminal_review_config(
+        pid, "mission-001"
+    )
+    assert review_config.deliverable_roots == [str(report.resolve())]
 
 
 # ---------------------------------------------------------------------------

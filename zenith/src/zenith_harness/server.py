@@ -216,8 +216,11 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
             Field(
                 default=None,
                 description=(
-                    "Exact existing final-artifact files or directories the independent "
-                    "reviewer may inspect in addition to the normal workspace."
+                    "Final-artifact roots authorized by terminal-review policy in "
+                    "addition to the normal workspace product surface. None keeps the "
+                    "persisted declaration (default empty), [] clears it, and a "
+                    "non-empty list replaces it after canonical preflight. This is a "
+                    "best-effort independence guard, not an OS filesystem sandbox."
                 ),
             ),
         ] = None,

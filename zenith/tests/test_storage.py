@@ -1,6 +1,7 @@
 """Storage layer tests. See specs/memory_v2/PRODUCT.md for layout."""
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -412,21 +413,121 @@ class TestTerminalReviews:
     ) -> None:
         store.create_project("brief", workspace, project_id="p1")
         mission = store.mission_dir("p1", "mission-001")
-        report = mission / "evidence" / "report.md"
-        report.parent.mkdir(parents=True)
-        report.write_text("report")
+        evidence = mission / "evidence"
+        report_dir = evidence / "final"
+        report = report_dir / "report.md"
+        report_dir.mkdir(parents=True)
+        report.write_text("report", encoding="utf-8")
+        product_dir = workspace / "src"
+        product_dir.mkdir()
+        product = product_dir / "product.py"
+        product.write_text("VALUE = 1\n", encoding="utf-8")
+        product_alias = workspace / "product-alias.py"
+        product_alias.symlink_to(product)
 
         roots = store.resolve_terminal_review_roots(
-            "p1", "mission-001", [str(report)]
+            "p1",
+            "mission-001",
+            [
+                str(report_dir),
+                str(product),
+                str(report),
+                str(report),
+                str(product_alias),
+                str(product.relative_to(workspace)),
+            ],
+        )
+        assert roots == sorted(
+            [str(report_dir.resolve()), str(report.resolve()), str(product.resolve())]
         )
         config = TerminalReviewConfig(deliverable_roots=roots)
         store.save_terminal_review_config("p1", "mission-001", config)
         assert store.load_terminal_review_config("p1", "mission-001") == config
 
-        with pytest.raises(ValueError, match="forbidden mission artifact"):
-            store.resolve_terminal_review_roots("p1", "mission-001", [str(mission)])
-        with pytest.raises(ValueError, match="forbidden workspace artifact"):
-            store.resolve_terminal_review_roots("p1", "mission-001", [str(workspace)])
+    def test_declared_roots_reject_process_and_control_surfaces(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        mission = store.mission_dir("p1", "mission-001")
+        process_paths = [
+            mission / "mission.md",
+            mission / "contract" / "VAL-001.md",
+            mission / "attempts" / "worker.md",
+            mission / "regressions" / "VAL-001.md",
+            mission / "terminal-reviews" / "prior.md",
+            mission / "closeout.md",
+            store.zenith_dir("p1") / "decisions" / "prior.md",
+            store.zenith_dir("p1") / "MEMORY.md",
+            store.mission_runtime_dir("p1", "mission-001") / "cursor.json",
+            store.zenith_dir("p1") / "AGENTS.md",
+            store.zenith_dir("p1") / "skills" / "control.md",
+        ]
+        for path in process_paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("private process history", encoding="utf-8")
+
+        forbidden_workspace = [
+            workspace / ".git",
+            workspace / ".zenith",
+            workspace / ".zenith-runtime",
+            workspace / ".agents",
+            workspace / ".claude",
+            workspace / ".codex",
+            workspace / "AGENTS.md",
+        ]
+        for path in forbidden_workspace[:3]:
+            path.mkdir(exist_ok=True)
+
+        outside = workspace.parent / "outside.md"
+        outside.write_text("outside", encoding="utf-8")
+        rejected = [
+            mission,
+            store.bucket_root("p1"),
+            *process_paths,
+            *forbidden_workspace,
+            workspace,
+            outside,
+        ]
+        for path in rejected:
+            with pytest.raises(ValueError):
+                store.resolve_terminal_review_roots(
+                    "p1", "mission-001", [str(path)]
+                )
+
+    def test_project_bucket_nested_in_workspace_is_not_product_surface(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        harness_home = workspace / "control-home"
+        nested_store = ProjectStore(
+            replace(
+                store.config,
+                harness_home=harness_home,
+                projects_dir=harness_home / "projects",
+            )
+        )
+        nested_store.create_project("brief", workspace, project_id="p1")
+        mission = nested_store.mission_dir("p1", "mission-001")
+        report = mission / "evidence" / "report.md"
+        report.parent.mkdir(parents=True)
+        report.write_text("report", encoding="utf-8")
+        product = workspace / "product.md"
+        product.write_text("product", encoding="utf-8")
+
+        assert nested_store.resolve_terminal_review_roots(
+            "p1", "mission-001", [str(product), str(report)]
+        ) == sorted([str(product.resolve()), str(report.resolve())])
+
+        rejected = [
+            harness_home,
+            nested_store.config.projects_dir,
+            nested_store.bucket_root("p1"),
+            nested_store.zenith_dir("p1") / "MEMORY.md",
+        ]
+        for path in rejected:
+            with pytest.raises(ValueError):
+                nested_store.resolve_terminal_review_roots(
+                    "p1", "mission-001", [str(path)]
+                )
 
     def test_declared_roots_reject_escaping_or_injecting_paths(
         self, store: ProjectStore, workspace: Path
@@ -441,8 +542,30 @@ class TestTerminalReviews:
                 "p1", "mission-001", [str(report_dir)]
             )
 
+        product = workspace / "product.md"
+        product.write_text("product", encoding="utf-8")
+        direct_escape = mission / "evidence" / "direct-escape"
+        direct_escape.symlink_to(product)
+        with pytest.raises(ValueError, match="mission evidence subtree"):
+            store.resolve_terminal_review_roots(
+                "p1", "mission-001", [str(direct_escape)]
+            )
+
+        broken_dir = mission / "evidence" / "broken"
+        broken_dir.mkdir()
+        (broken_dir / "missing").symlink_to(mission / "evidence" / "missing")
+        with pytest.raises(ValueError, match="broken symlink"):
+            store.resolve_terminal_review_roots(
+                "p1", "mission-001", [str(broken_dir)]
+            )
+
+        with pytest.raises(ValueError, match="does not exist"):
+            store.resolve_terminal_review_roots(
+                "p1", "mission-001", [str(mission / "evidence" / "absent")]
+            )
+
         bad_name = mission / "evidence" / "report\ninjected.md"
-        bad_name.write_text("report")
+        bad_name.write_text("report", encoding="utf-8")
         with pytest.raises(ValueError, match="control characters"):
             store.resolve_terminal_review_roots(
                 "p1", "mission-001", [str(bad_name)]

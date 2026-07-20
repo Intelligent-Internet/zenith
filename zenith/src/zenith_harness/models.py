@@ -348,7 +348,11 @@ class TerminalReviewHandoff(BaseModel):
 
 
 class TerminalReviewConfig(BaseModel):
-    """Explicit artifacts allowed as objects of independent closure review."""
+    """Canonical roots authorized by closure-review policy after preflight.
+
+    This is a best-effort guard against accidental process-history exposure,
+    not an OS filesystem sandbox or hard read-isolation boundary.
+    """
 
     model_config = ConfigDict(extra="forbid")
 

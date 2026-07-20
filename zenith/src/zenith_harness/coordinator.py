@@ -726,7 +726,8 @@ class MissionCoordinator:
 
     def _enter_terminal_review(self, mid: str) -> StepResult:
         config = self.store.load_terminal_review_config(self.project_id, mid)
-        # Best-effort preflight: reviewer filesystem access is not an OS sandbox.
+        # Revalidate persisted roots immediately before dispatch. This canonical
+        # policy preflight is best-effort; reviewer access is not OS-sandboxed.
         resolved_roots = self.store.resolve_terminal_review_roots(
             self.project_id, mid, config.deliverable_roots
         )
