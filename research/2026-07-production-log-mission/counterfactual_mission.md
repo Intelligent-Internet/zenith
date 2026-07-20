@@ -50,11 +50,11 @@ Soft budget: 24 wall hours, 40 attempts, 2× task growth, two versions per repor
 
 ## Estimated savings and falsification
 
-| Change | Trace cost exposed | Conservative expected saving |
+| Change | Uniquely attributed trace cost | Unmeasured replay target |
 |---|---:|---:|
-| Avoid default 24-shard semantic program after non-estimability | 18.15 active h semantic-reliability phase | 10–16 active h |
-| Changed-surface validation and no v2–v9 full lineage | 17.14 active h validation/fail-closed/report repair combined | 6–10 active h |
-| Correct terminal visibility and loop detection | 0.35 active h plus non-closure | 0.2–0.35 active h; enables completion |
-| Critical-path/scoped scheduling | 17.70 non-busy h upper bound | Unknown until replay; target 3–8 wall h |
+| Avoid default 24-shard semantic program after non-estimability | 6.82 active h in uniquely matched semantic-reliability sessions | Target 4–6 active h |
+| Changed-surface validation and no v2–v9 full lineage | 6.74 active h in uniquely matched validation/fail-closed/report-repair sessions | Target 3–5 active h |
+| Correct terminal visibility and loop detection | 0.35 uniquely matched active h plus non-closure | Target 0.2–0.35 active h; enables completion |
+| Critical-path/scoped scheduling | 28.57 non-busy h upper bound relative to uniquely matched intervals | Target 3–8 wall h; unknown until replay |
 
-These ranges overlap and must not be summed mechanically. The combined replay target is 16–24 wall hours. Falsify it by running the same frozen brief and oracle through both harnesses; reject the lean design if a blinded reviewer finds a lost supported conclusion, a weakened uncertainty boundary, or broken evidence provenance.
+The analyzer leaves 75 ambiguous events without duration or usage attribution, so these costs are lower-bound slices rather than whole-phase totals. The target ranges are unmeasured and overlap; they must not be summed mechanically. The combined unmeasured replay target is 16–24 wall hours. Falsify it by running the same frozen brief and oracle through both harnesses; reject the lean design if a blinded reviewer finds a lost supported conclusion, a weakened uncertainty boundary, or broken evidence provenance.

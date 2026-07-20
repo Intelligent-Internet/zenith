@@ -23,26 +23,34 @@
     }
   },
   "elapsed": {
-    "effective_parallelism_when_busy": 1.42,
-    "idle_gap_count_at_least_5m": 6,
+    "effective_parallelism_when_busy": 1.092,
+    "idle_gap_count_at_least_5m": 27,
     "largest_idle_gaps_seconds": [
       27433.342,
-      18413.589,
+      19359.152,
+      8430.307,
       6448.123,
       5779.958,
-      901.639,
-      441.375
+      4112.931,
+      3587.973,
+      2252.61,
+      1880.416,
+      1760.567
     ],
-    "matched_worker_and_reviewer_active_hours": 46.637,
-    "matched_worker_and_reviewer_active_seconds": 167894.006,
-    "nonbusy_hours": 17.703,
-    "nonbusy_seconds": 63730.923,
+    "matched_worker_and_reviewer_active_hours": 23.987,
+    "matched_worker_and_reviewer_active_seconds": 86352.103,
+    "nonbusy_hours": 28.572,
+    "nonbusy_seconds": 102857.598,
     "planning_to_first_dispatch_seconds": 6441.0,
-    "union_busy_seconds": 118213.077,
+    "union_busy_seconds": 79086.402,
     "wall_hours": 50.54,
     "wall_seconds": 181944.0
   },
   "execution": {
+    "ambiguity_status_counts": {
+      "multiple_time_only_candidates": 75
+    },
+    "ambiguous_match_count": 75,
     "attempt_count": 142,
     "attempt_outcomes": {
       "done_false": 34,
@@ -57,20 +65,27 @@
       "retry": 5
     },
     "decision_count": 41,
-    "matched_sessions": 145,
+    "match_method_counts": {
+      "ambiguous": 75,
+      "task_id_and_time": 36,
+      "time_only_unique": 34
+    },
+    "matched_sessions": 70,
     "report_failclosed_validator_attempts": 16,
     "terminal_review_count": 3,
     "terminal_review_results": {
       "done_false": 3
     },
     "unmatched_attempt_count": 0,
-    "unmatched_attempts": []
+    "unmatched_attempts": [],
+    "unmatched_match_count": 0
   },
   "method_limits": [
     "Session token counters are Codex-reported totals; input totals include cached input and should not be added to cached input again.",
     "Active time uses task_started/task_complete intervals from matched Codex sessions. It excludes uninstrumented shell/service latency outside those sessions.",
     "The task and contract baselines are inferred by subtracting patch additions from final state; in-place textual growth is not represented.",
-    "No production-log payload or mission evidence content was opened by this profiler; only orchestration metadata was read."
+    "This mission-evidence-payload-blind analysis did not open production-log or mission-evidence payload content; it read bounded Codex session/event text only for event-to-session correlation.",
+    "Ambiguous and unmatched events remain in the execution ledger but contribute no matched duration or token usage; zero unmatched events would not prove attribution correctness."
   ],
   "source": {
     "analysis_end_at": "2026-07-19T15:36:09Z",
@@ -78,28 +93,31 @@
     "project_created_at": "2026-07-17T13:03:45Z",
     "project_id": "20260717T130345Z-read-only-all-around-production-log-research-for-agent-builder-p",
     "runtime_state_after_reviews": "mission_running",
-    "workspace_dir": "/Users/aleksandrpodgaiko/Desktop/agents/cx"
+    "workspace_dir": "<historical-workspace>"
   },
   "stage_active_seconds": {
-    "analysis": 17820.072,
+    "analysis": 16227.236,
     "fail_closed_analysis_repair": 13221.724,
-    "manual_semantic_reliability": 65329.389,
-    "other_work": 5920.855,
+    "manual_semantic_reliability": 24538.269,
+    "orchestration": 0,
+    "other_work": 4239.882,
     "planning": 6441.0,
     "population_and_retrieval": 15843.513,
     "report_provenance_repair": 11029.622,
     "terminal_review": 1251.857,
-    "validation": 37476.974
+    "validation": 0.0
   },
   "stage_total_tokens": {
-    "analysis": 127431741,
+    "analysis": 114680884,
     "fail_closed_analysis_repair": 75766825,
-    "manual_semantic_reliability": 332798453,
-    "other_work": 31290366,
+    "manual_semantic_reliability": 112877224,
+    "orchestration": 0,
+    "other_work": 24509035,
+    "planning": 0,
     "population_and_retrieval": 94243675,
     "report_provenance_repair": 69659447,
     "terminal_review": 6889677,
-    "validation": 227246809
+    "validation": 0
   },
   "topology": {
     "contract_growth_factor": 2.588,
@@ -130,10 +148,10 @@
     }
   },
   "usage": {
-    "cached_input_tokens": 933481472,
-    "input_tokens": 961189196,
-    "output_tokens": 4137797,
-    "reasoning_output_tokens": 840842,
-    "total_tokens": 965326993
+    "cached_input_tokens": 483505152,
+    "input_tokens": 496654556,
+    "output_tokens": 1972211,
+    "reasoning_output_tokens": 421973,
+    "total_tokens": 498626767
   }
 }

@@ -25,7 +25,9 @@ The original request legitimately grew from a two-project tool audit into a week
 
 The run grew from an inferred 24 tasks and 17 contracts to 168 tasks and 44 contracts. It made 142 attempts, 41 attention decisions, and 16 validator attempts against the fail-closed report lineage. The mission evidence tree reached 30,878 files and 42.05 GB of logical data with only two hard-link aliases. Three terminal reviews all returned `done=false`; the runtime remained `mission_running` even though the final v9 gate had cleared.
 
-A lean counterfactual keeps the defensible findings and uncertainty boundaries, but treats exploration, statistical estimability, and final acceptance as different things. It would use one immutable corpus, a small set of parallel analysis lanes, early closure of non-estimable population claims, changed-surface validation, and one final reviewer allowed to inspect the declared output root. The trace supports a testable target of 16–24 wall hours for a comparable run (52–68% below actual), not yet a measured claim.
+Unique-only correlation selected 70 of the 145 attempt/reviewer events and classified the other 75 as ambiguous; none were unmatched. Ambiguous events contribute no duration or usage. Zero unmatched events is not evidence that attribution is complete or correct—the ambiguity count is the relevant warning here.
+
+A lean counterfactual keeps the defensible findings and uncertainty boundaries, but treats exploration, statistical estimability, and final acceptance as different things. It would use one immutable corpus, a small set of parallel analysis lanes, early closure of non-estimable population claims, changed-surface validation, and one final reviewer allowed to inspect the declared output root. Its explicitly unmeasured target is 16–24 wall hours for a comparable run (52–68% below actual); only a replay could turn that target into evidence.
 
 ## 1. Zenith in five minutes
 
@@ -108,39 +110,40 @@ The subsequent expansion was mostly harness-created assurance work:
 | Metric | Observed |
 |---|---:|
 | Wall time | 50.54 h |
-| Matched worker/reviewer active time | 46.64 h |
-| Union of active intervals | 32.84 h |
-| Non-busy wall time | 17.70 h |
-| Effective parallelism while active | 1.42× |
+| Uniquely matched worker/reviewer active time | 23.99 h |
+| Union of uniquely matched active intervals | 21.97 h |
+| Non-busy wall time relative to that union | 28.57 h |
+| Effective parallelism within the matched subset | 1.09× |
 | Configured maximum parallel nodes | 4 |
 | Attempts | 142 |
 | Attempts requesting attention | 39 |
 | Decisions | 41: 30 patch, 5 retry, 6 continue |
+| Attempt/reviewer matches | 70 selected; 75 ambiguous; 0 unmatched |
 | Task growth | 24 inferred → 168 final (7.0×) |
 | Contract growth | 17 inferred → 44 final (2.59×) |
 | Supersession operations | 53 |
 | Validator handoffs | 11 pass, 23 fail |
 | Terminal reviews | 3, all `done=false` |
 | Mission evidence | 30,878 files; 42.05 GB logical |
-| Codex-reported tokens | 965.3M total; 933.5M cached input |
+| Codex-reported tokens from uniquely matched sessions | 498.6M total; 483.5M cached input |
 
-Active time is a sum across concurrent sessions; it is not additive with wall time. The token counter is Codex-reported and input already includes cached input. It should not be interpreted as 965M newly processed tokens or as billable usage.
+Active time is a sum across concurrent sessions; it is not additive with wall time. The token counter is Codex-reported and input already includes cached input. It should not be interpreted as 498.6M newly processed tokens or as billable usage. The 75 ambiguous events are deliberately absent from both totals.
 
 ### Active-effort Pareto
 
 | Classified phase | Active effort | Share | Total tokens |
 |---|---:|---:|---:|
-| Manual semantic reliability | 18.15 h | 37.5% | 332.8M |
-| Validation | 10.41 h | 21.5% | 227.2M |
-| Core analysis | 4.95 h | 10.2% | 127.4M |
-| Population and retrieval | 4.40 h | 9.1% | 94.2M |
-| Fail-closed analysis repair | 3.67 h | 7.6% | 75.8M |
-| Report/provenance repair | 3.06 h | 6.3% | 69.7M |
-| Initial planning | 1.79 h | 3.7% | not separately available |
-| Other work | 1.64 h | 3.4% | 31.3M |
-| Terminal review | 0.35 h | 0.7% | 6.9M |
+| Manual semantic reliability | 6.82 h | 26.4% | 112.9M |
+| Core analysis | 4.51 h | 17.5% | 114.7M |
+| Population and retrieval | 4.40 h | 17.1% | 94.2M |
+| Fail-closed analysis repair | 3.67 h | 14.2% | 75.8M |
+| Report/provenance repair | 3.06 h | 11.9% | 69.7M |
+| Initial planning | 1.79 h | 6.9% | not separately available |
+| Other work | 1.18 h | 4.6% | 24.5M |
+| Terminal review | 0.35 h | 1.3% | 6.9M |
+| Validation | 0.00 h | 0.0% | 0.0M |
 
-The dominant cost was not downloading or analyzing logs. Manual semantic-reliability repair plus validation consumed 28.56 agent-hours, 59% of classified active effort.
+These percentages use 25.78 hours: uniquely matched stage time plus the separately observed initial-planning interval. They describe only the attributable subset. In particular, zero attributed validation time means no validation event obtained a unique session match; it does not mean validation work did not occur. The 75 ambiguous rows make a whole-run phase ranking unsupportable from this trace.
 
 ### Critical path and idle time
 
@@ -148,7 +151,7 @@ The structural critical path was:
 
 `scope → corpus → core analyses → semantic-reliability repair → fail-closed report → repeated provenance versions → final gate → terminal-review loop`
 
-The six gaps of at least five minutes totaled most of the 17.70 non-busy hours; the two largest were 7.62 h and 5.11 h. The trace includes user interruption, overnight delay, Wi-Fi disruption and external model/usage-limit failures. Therefore 17.70 h is an upper bound on scheduling opportunity, not “Zenith idle waste.” Still, global attention pauses, serial gate checkpoints, and long repair prerequisites prevented the four-node scheduler from obtaining more than 1.42× effective parallelism while work was active.
+There are 27 gaps of at least five minutes in the uniquely matched interval union; the two largest were 7.62 h and 5.38 h. The trace includes user interruption, overnight delay, Wi-Fi disruption and external model/usage-limit failures. Therefore the resulting 28.57 non-busy hours are an attribution-sensitive upper bound on scheduling opportunity, not “Zenith idle waste.” The matched subset reached 1.09× effective parallelism; ambiguity prevents treating that as a complete scheduler-utilization measure.
 
 The detailed timestamped ledger is [execution_ledger.csv](generated/execution_ledger.csv). Its phase labels are reproducible heuristics based on task identity and are deliberately not treated as ground truth.
 
@@ -162,7 +165,7 @@ In this run, questions such as representative semantic rates were contract-shape
 
 ### B. The semantic-reliability method failed before the work did
 
-The first reliability package used generated output as if it were independent manual coding. Correctly rejecting that evidence led to new codebooks, holdouts, blinded packets and 24 review shards. This preserved integrity, but it also spent 18.15 active hours pursuing semantic rate claims after the population basis had already become descriptive and after the original user-facing answer could have retained examples plus an explicit non-estimability limitation.
+The first reliability package used generated output as if it were independent manual coding. Correctly rejecting that evidence led to new codebooks, holdouts, blinded packets and 24 review shards. This preserved integrity, but it also created substantial work pursuing semantic rate claims after the population basis had already become descriptive. The unique-only ledger attributes 6.82 active hours to that phase; ambiguous events prevent a defensible whole-phase total.
 
 The missing control was an early question: “Does this claim still change the supported answer enough to justify a statistically independent coding program?”
 
@@ -227,7 +230,7 @@ Key differences:
 - Validate the changed claim/evidence surface. Reuse unchanged validator results by content hash.
 - Run one final review against an explicit, read-only deliverable root with mission history still hidden.
 
-The observed population, core-analysis, synthesis and bounded-validation effort imply a 16–24 hour wall target under similar external conditions. That is a counterfactual range, not replay evidence. It should be accepted only if the final conclusions, traceability and uncertainty match the original result under blinded comparison.
+The topology and uniquely attributable subset motivate an unmeasured 16–24 hour wall target under similar external conditions. This is a counterfactual target, not an observed saving or replay result. It should be accepted only if the final conclusions, traceability and uncertainty match the original result under blinded comparison.
 
 ## 6. Recommended changes
 
@@ -246,7 +249,7 @@ The branch-ready specifications are expanded in [IMPLEMENTATION_BACKLOG.md](IMPL
 | P1 | Non-estimable claims remain active repair targets | First-class `not_estimable` disposition with oracle and preserved descriptive evidence | impossible rate → repair chain; impossible rate → bounded limitation | High | Medium | M | Population-ineligible fixture; ensure no numeric claim can pass |
 | P1 | Evidence versions copy full trees | Content-addressed immutable corpus + manifest/delta packages; optionally reflink local materialization | 42 GB versions → shared corpus + small deltas | Storage and read/token cost | Medium: provenance | L | Recreate v2–v9 packages and compare hashes, bytes and validation |
 | P1 | Cleared gates always trigger global attention | Semantic checkpoint policy; auto-continue mechanical clears and block only affected subgraph | global stop → scoped continuation | Medium–high | Medium | M–L | Scheduler simulation with independent branches and injected failure |
-| P2 | Scheduler optimizes readiness, not mission critical path | Prioritize critical-path nodes and batch independent validators | 1.42× active parallelism → higher bounded utilization | Medium | Medium | L | Deterministic trace simulation; compare makespan and decisions |
+| P2 | Scheduler optimizes readiness, not mission critical path | Prioritize critical-path nodes and batch independent validators | 1.09× in uniquely matched subset → higher bounded utilization | Medium | Medium | L | Deterministic trace simulation; compare makespan and decisions |
 | P2 | Retry/replan relies on prose judgment | Structured failure taxonomy and repair-family loop detector | repeated symptom patches → method-level escalation | Medium | Low–medium | M | Classify historical decisions; measure precision before enforcement |
 | P2 | Context capacity failure appears after spawn | Preflight task/context size and choose split or larger-capacity route | failed attempt → planned shard | Low–medium | Low | M | Oversized synthetic task and recorded model-capacity failures |
 
@@ -262,17 +265,18 @@ The branch-ready specifications are expanded in [IMPLEMENTATION_BACKLOG.md](IMPL
 
 ## Measurement method and limits
 
-`analyze_trace.py` reads orchestration metadata, attempt records and matched Codex session events. It does not inspect production-log payloads or the mission's evidence content. It computes:
+`analyze_trace.py` performs mission-evidence-payload-blind analysis over orchestration records and Codex session/event data. It does not open production-log or mission-evidence payload content; it retains bounded Codex session text only for event-to-session correlation. It computes:
 
 - wall interval from project creation through the latest recorded decision;
 - active session intervals from `task_started` / `task_complete` events;
 - their union and parallel overlap;
 - task/contract growth from final state and patch additions;
 - attempt, decision and terminal-review counts;
+- unique-only match diagnostics, with ambiguous and unmatched events excluded from duration and usage;
 - Codex-reported token totals; and
 - logical/allocated artifact size and inode counts.
 
-The inferred initial task and contract counts subtract patch additions from final topology; in-place textual changes are not counted. Stage attribution is heuristic. Non-busy time includes human and external-system pauses. The exact executing Zenith commit was not persisted. These limits are reasons to implement telemetry, not invitations to turn estimates into facts.
+The inferred initial task and contract counts subtract patch additions from final topology; in-place textual changes are not counted. Stage attribution is a task-identity heuristic, not ground truth. Non-busy time includes human and external-system pauses. Zero unmatched events does not prove attribution correctness, and 75 ambiguous events remain deliberately unattributed. The exact executing Zenith commit was not persisted. These limits are reasons to implement telemetry, not invitations to turn estimates into facts.
 
 ## Acceptance test for the recommendations
 

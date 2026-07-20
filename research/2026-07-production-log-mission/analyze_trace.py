@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Build a reproducible, metadata-only profile of one Zenith mission.
+"""Build a reproducible, mission-evidence-payload-blind Zenith trace profile.
 
-The script reads Zenith runtime metadata and matching Codex JSONL session
-metadata. It never opens mission evidence payloads or production logs.
+The script reads Zenith runtime records and Codex JSONL session/event data. It
+does not open production-log or mission-evidence payload content; it retains
+bounded Codex session text only for event-to-session correlation.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ ATTEMPT_RE = re.compile(
 )
 DECISION_TS_RE = re.compile(r"^- Timestamp: (?P<stamp>[^\s]+)$", re.MULTILINE)
 JSON_BLOCK_RE = re.compile(r"```json\n(?P<body>.*?)\n```", re.DOTALL)
+HISTORICAL_WORKSPACE = "<historical-workspace>"
 
 
 def parse_iso(value: str) -> datetime:
@@ -109,6 +111,19 @@ class Session:
         return sum(seconds(start, end) for start, end in self.active_intervals)
 
 
+@dataclass(frozen=True)
+class MatchResult:
+    session: Session | None
+    method: str
+    delta_seconds: float | None
+    eligible_candidate_count: int
+    ambiguity_status: str
+
+    @property
+    def ambiguous(self) -> bool:
+        return self.method == "ambiguous"
+
+
 def load_session(path: Path) -> Session | None:
     meta: dict[str, Any] | None = None
     first: datetime | None = None
@@ -183,7 +198,15 @@ def relevant_sessions(
         if project_id not in loaded.text and "Zenith Terminal Reviewer" not in loaded.text:
             continue
         sessions.append(loaded)
-    return sorted(sessions, key=lambda item: item.start)
+    return sorted(sessions, key=lambda item: (item.start, item.session_id))
+
+
+def build_session_aliases(sessions: Iterable[Session]) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for session in sorted(sessions, key=lambda item: (item.start, item.end, item.session_id)):
+        if session.session_id and session.session_id not in aliases:
+            aliases[session.session_id] = f"session-{len(aliases) + 1:03d}"
+    return aliases
 
 
 def match_session(
@@ -193,26 +216,74 @@ def match_session(
     used: set[str],
     *,
     tolerance_seconds: int = 90,
-) -> Session | None:
-    candidates = [
+) -> MatchResult:
+    task_candidates = [
         session
         for session in sessions
         if session.session_id not in used
         and event_id in session.text
         and abs((session.start - event_start).total_seconds()) <= tolerance_seconds
     ]
-    if not candidates:
-        candidates = [
-            session
-            for session in sessions
-            if session.session_id not in used
-            and abs((session.start - event_start).total_seconds()) <= 15
-        ]
-    if not candidates:
-        return None
-    selected = min(candidates, key=lambda item: abs((item.start - event_start).total_seconds()))
-    used.add(selected.session_id)
-    return selected
+    if task_candidates:
+        deltas = {
+            session.session_id: abs((session.start - event_start).total_seconds())
+            for session in task_candidates
+        }
+        minimum_delta = min(deltas.values())
+        best = [session for session in task_candidates if deltas[session.session_id] == minimum_delta]
+        if len(best) != 1:
+            return MatchResult(
+                session=None,
+                method="ambiguous",
+                delta_seconds=minimum_delta,
+                eligible_candidate_count=len(task_candidates),
+                ambiguity_status="task_id_and_time_tie",
+            )
+        selected = best[0]
+        used.add(selected.session_id)
+        return MatchResult(
+            session=selected,
+            method="task_id_and_time",
+            delta_seconds=minimum_delta,
+            eligible_candidate_count=len(task_candidates),
+            ambiguity_status="not_ambiguous",
+        )
+
+    time_candidates = [
+        session
+        for session in sessions
+        if session.session_id not in used
+        and abs((session.start - event_start).total_seconds()) <= 15
+    ]
+    if len(time_candidates) == 1:
+        selected = time_candidates[0]
+        delta = abs((selected.start - event_start).total_seconds())
+        used.add(selected.session_id)
+        return MatchResult(
+            session=selected,
+            method="time_only_unique",
+            delta_seconds=delta,
+            eligible_candidate_count=1,
+            ambiguity_status="not_ambiguous",
+        )
+    if time_candidates:
+        minimum_delta = min(
+            abs((session.start - event_start).total_seconds()) for session in time_candidates
+        )
+        return MatchResult(
+            session=None,
+            method="ambiguous",
+            delta_seconds=minimum_delta,
+            eligible_candidate_count=len(time_candidates),
+            ambiguity_status="multiple_time_only_candidates",
+        )
+    return MatchResult(
+        session=None,
+        method="unmatched",
+        delta_seconds=None,
+        eligible_candidate_count=0,
+        ambiguity_status="not_ambiguous",
+    )
 
 
 def interval_union_seconds(intervals: Iterable[tuple[datetime, datetime]]) -> float:
@@ -281,6 +352,10 @@ def parse_decisions(decision_dir: Path) -> tuple[list[dict[str, Any]], dict[str,
                 "output_tokens": 0,
                 "reasoning_output_tokens": 0,
                 "total_tokens": 0,
+                "match_method": "",
+                "match_delta_seconds": "",
+                "match_candidate_count": "",
+                "match_ambiguity": "",
                 "done": "",
                 "passed": "",
                 "request_attention": "",
@@ -295,8 +370,9 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     fieldnames = [
         "event_kind", "event_id", "event_type", "stage", "start_utc", "end_utc",
         "duration_seconds", "session_id", "input_tokens", "cached_input_tokens",
-        "output_tokens", "reasoning_output_tokens", "total_tokens", "done", "passed",
-        "request_attention", "final_status", "note",
+        "output_tokens", "reasoning_output_tokens", "total_tokens", "match_method",
+        "match_delta_seconds", "match_candidate_count", "match_ambiguity", "done",
+        "passed", "request_attention", "final_status", "note",
     ]
     with path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
@@ -354,7 +430,10 @@ def main() -> None:
     last_review_start = max((terminal_review_start(path) for path in review_paths), default=project_start)
     session_end_bound = datetime.fromtimestamp(last_review_start.timestamp() + 3600, tz=UTC)
     sessions = relevant_sessions(args.sessions_root.resolve(), project["id"], project_start, session_end_bound)
+    session_aliases = build_session_aliases(sessions)
     used_sessions: set[str] = set()
+    matched_raw_session_ids: set[str] = set()
+    match_results: list[MatchResult] = []
     rows: list[dict[str, Any]] = []
     active_intervals: list[tuple[datetime, datetime]] = []
     stage_seconds = Counter()
@@ -372,9 +451,13 @@ def main() -> None:
         task_id = match.group("task")
         task = tasks.get(task_id, {"type": "unknown"})
         payload = read_json(path)
-        session = match_session(start, task_id, sessions, used_sessions)
-        if session is None:
+        match_result = match_session(start, task_id, sessions, used_sessions)
+        match_results.append(match_result)
+        session = match_result.session
+        if match_result.method == "unmatched":
             unmatched_attempts.append(path.name)
+        if session:
+            matched_raw_session_ids.add(session.session_id)
         event_end = session.end if session else start
         active = session.active_seconds if session else 0.0
         if session:
@@ -398,7 +481,11 @@ def main() -> None:
                 "duration_seconds": round(active, 3), "session_id": session.session_id if session else "",
                 "input_tokens": usage.get("input_tokens", 0), "cached_input_tokens": usage.get("cached_input_tokens", 0),
                 "output_tokens": usage.get("output_tokens", 0), "reasoning_output_tokens": usage.get("reasoning_output_tokens", 0),
-                "total_tokens": usage.get("total_tokens", 0), "done": done,
+                "total_tokens": usage.get("total_tokens", 0), "match_method": match_result.method,
+                "match_delta_seconds": round(match_result.delta_seconds, 3)
+                if match_result.delta_seconds is not None else "",
+                "match_candidate_count": match_result.eligible_candidate_count,
+                "match_ambiguity": match_result.ambiguity_status, "done": done,
                 "passed": passed if passed is not None else "", "request_attention": attention,
                 "final_status": task_state.get(task_id, {}).get("status", ""), "note": path.name,
             }
@@ -412,7 +499,9 @@ def main() -> None:
                 "start_utc": iso(project_start), "end_utc": iso(first_attempt_start),
                 "duration_seconds": round(seconds(project_start, first_attempt_start), 3), "session_id": "",
                 "input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0, "reasoning_output_tokens": 0,
-                "total_tokens": 0, "done": "", "passed": "", "request_attention": "", "final_status": "",
+                "total_tokens": 0, "match_method": "", "match_delta_seconds": "",
+                "match_candidate_count": "", "match_ambiguity": "", "done": "", "passed": "",
+                "request_attention": "", "final_status": "",
                 "note": "Project creation to first worker dispatch; includes clarification and contract planning.",
             }
         )
@@ -421,7 +510,13 @@ def main() -> None:
     review_end: datetime | None = None
     for path in review_paths:
         start = terminal_review_start(path)
-        session = match_session(start, "terminal review", sessions, used_sessions, tolerance_seconds=120)
+        match_result = match_session(
+            start, "terminal review", sessions, used_sessions, tolerance_seconds=120
+        )
+        match_results.append(match_result)
+        session = match_result.session
+        if session:
+            matched_raw_session_ids.add(session.session_id)
         payload = read_json(path)
         event_end = session.end if session else start
         review_end = max(review_end, event_end) if review_end else event_end
@@ -439,7 +534,12 @@ def main() -> None:
                 "duration_seconds": round(active, 3), "session_id": session.session_id if session else "",
                 "input_tokens": usage.get("input_tokens", 0), "cached_input_tokens": usage.get("cached_input_tokens", 0),
                 "output_tokens": usage.get("output_tokens", 0), "reasoning_output_tokens": usage.get("reasoning_output_tokens", 0),
-                "total_tokens": usage.get("total_tokens", 0), "done": payload.get("done"), "passed": "",
+                "total_tokens": usage.get("total_tokens", 0), "match_method": match_result.method,
+                "match_delta_seconds": round(match_result.delta_seconds, 3)
+                if match_result.delta_seconds is not None else "",
+                "match_candidate_count": match_result.eligible_candidate_count,
+                "match_ambiguity": match_result.ambiguity_status,
+                "done": payload.get("done"), "passed": "",
                 "request_attention": not payload.get("done", False), "final_status": state.get("state", ""),
                 "note": "Fresh-context reviewer; mission artifacts forbidden by reviewer prompt.",
             }
@@ -448,16 +548,29 @@ def main() -> None:
     decision_rows, growth = parse_decisions(project_root / ".zenith" / "decisions")
     rows.extend(decision_rows)
 
+    for row in rows:
+        stage_seconds.setdefault(row["stage"], 0)
+        stage_tokens.setdefault(row["stage"], 0)
+
     all_usage = Counter()
-    matched_session_ids = {row["session_id"] for row in rows if row["session_id"]}
+    for row in rows:
+        raw_session_id = row["session_id"]
+        if raw_session_id:
+            row["session_id"] = session_aliases[raw_session_id]
+
     for session in sessions:
-        if session.session_id in matched_session_ids or session.thread_source == "user":
+        if session.session_id in matched_raw_session_ids:
             all_usage.update(session.final_usage)
+
+    match_method_counts = Counter(result.method for result in match_results)
+    ambiguity_status_counts = Counter(
+        result.ambiguity_status for result in match_results if result.ambiguous
+    )
 
     task_type_counts = Counter(task["type"] for task in tasks.values())
     task_status_counts = Counter(value.get("status", "unknown") for value in task_state.values())
     contract_status_counts = Counter(value.get("status", "unknown") for value in contract_state.values())
-    action_counts = Counter(path.stem.split("-", 1)[1] for path in (project_root / ".zenith" / "decisions").glob("*.md"))
+    action_counts = Counter(row["event_type"] for row in decision_rows)
     initial_task_count = len(tasks) - growth.get("added_tasks", 0)
     initial_contract_count = len(contract_state) - growth.get("added_contracts", 0)
     latest_decision = max((parse_iso(row["start_utc"]) for row in decision_rows), default=project_start)
@@ -483,7 +596,7 @@ def main() -> None:
     metrics = {
         "source": {
             "project_id": project["id"], "mission_id": project.get("current_mission_id"),
-            "workspace_dir": project.get("workspace_dir"), "project_created_at": iso(project_start),
+            "workspace_dir": HISTORICAL_WORKSPACE, "project_created_at": iso(project_start),
             "analysis_end_at": iso(end), "runtime_state_after_reviews": state.get("state"),
         },
         "elapsed": {
@@ -507,12 +620,17 @@ def main() -> None:
             "contract_statuses": dict(contract_status_counts), "patch_growth": growth,
         },
         "execution": {
-            "attempt_count": len(attempt_paths), "terminal_review_count": len(review_paths),
+            "attempt_count": sum(row["event_kind"] == "attempt" for row in rows),
+            "terminal_review_count": sum(row["event_kind"] == "terminal_review" for row in rows),
             "terminal_review_results": dict(review_results), "decision_count": sum(action_counts.values()),
             "decision_actions": dict(action_counts), "attempt_outcomes": dict(outcome_counts),
             "report_failclosed_validator_attempts": report_validator_attempts,
-            "matched_sessions": len(matched_session_ids), "unmatched_attempt_count": len(unmatched_attempts),
-            "unmatched_attempts": unmatched_attempts,
+            "matched_sessions": len(matched_raw_session_ids),
+            "match_method_counts": dict(match_method_counts),
+            "ambiguity_status_counts": dict(ambiguity_status_counts),
+            "ambiguous_match_count": match_method_counts.get("ambiguous", 0),
+            "unmatched_match_count": match_method_counts.get("unmatched", 0),
+            "unmatched_attempt_count": len(unmatched_attempts), "unmatched_attempts": unmatched_attempts,
         },
         "usage": dict(all_usage),
         "stage_active_seconds": {key: round(value, 3) for key, value in stage_seconds.items()},
@@ -522,7 +640,8 @@ def main() -> None:
             "Session token counters are Codex-reported totals; input totals include cached input and should not be added to cached input again.",
             "Active time uses task_started/task_complete intervals from matched Codex sessions. It excludes uninstrumented shell/service latency outside those sessions.",
             "The task and contract baselines are inferred by subtracting patch additions from final state; in-place textual growth is not represented.",
-            "No production-log payload or mission evidence content was opened by this profiler; only orchestration metadata was read.",
+            "This mission-evidence-payload-blind analysis did not open production-log or mission-evidence payload content; it read bounded Codex session/event text only for event-to-session correlation.",
+            "Ambiguous and unmatched events remain in the execution ledger but contribute no matched duration or token usage; zero unmatched events would not prove attribution correctness.",
         ],
     }
 
