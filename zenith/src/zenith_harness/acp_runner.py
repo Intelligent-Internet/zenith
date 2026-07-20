@@ -24,7 +24,6 @@ from .models import (
 from .storage import (
     ProjectStore,
     atomic_write_json,
-    utc_now_iso,
 )
 
 logger = logging.getLogger(__name__)
@@ -559,7 +558,9 @@ class ACPNodeRunner:
         progress_callback: ProgressCallback | None = None,
     ) -> NodeHandoff:
         """Spawn the worker MCP server + ACP agent; poll the attempt file; return the handoff."""
-        role: Literal["validator", "worker"] = "validator" if task.type == "validate" else "worker"
+        role: Literal["validator", "worker"] = (
+            "validator" if task.type == "validate" else "worker"
+        )
         role_config = self.config.for_role(role)
         acp_command = role_config.worker_acp_command or role_config.resolved_worker_acp_command
         if not acp_command:
@@ -567,18 +568,8 @@ class ACPNodeRunner:
                 f"No ACP command for role={role}. Set ZENITH_{role.upper()}_ACP_COMMAND."
             )
         acp_command = _augment_acp_command(acp_command, role_config.worker_provider)
-        store.update_attempt_telemetry(
-            project_id,
-            mission_id,
-            spawn_ts,
-            task.id,
-            provider=role_config.worker_provider.name,
-            started_at=utc_now_iso(),
-        )
 
-        workspace_dir = str(
-            Path(cwd).expanduser().resolve() if cwd else store.workspace_dir(project_id)
-        )
+        workspace_dir = str(Path(cwd).expanduser().resolve() if cwd else store.workspace_dir(project_id))
         project_bucket = str(store.zenith_dir(project_id))
         handoff_path = store.attempt_path(project_id, mission_id, spawn_ts, task.id)
         handoff_path.parent.mkdir(parents=True, exist_ok=True)
@@ -606,14 +597,6 @@ class ACPNodeRunner:
             if mcp_process.returncode is None:
                 mcp_process.terminate()
             await _close_subprocess(mcp_process, timeout=5)
-            store.update_attempt_telemetry(
-                project_id,
-                mission_id,
-                spawn_ts,
-                task.id,
-                completed_at=utc_now_iso(),
-                error="Worker MCP server failed to start",
-            )
             return self._synthesize_missing_handoff(
                 task, summary="Worker MCP server failed to start"
             )
@@ -655,7 +638,6 @@ class ACPNodeRunner:
         await client.start()
         prompt_stop_reason: str | None = None
         session_error: str | None = None
-        session_id: str | None = None
         worker_exit_code: int | None = None
         worker_stderr: str = ""
         stderr_task = asyncio.create_task(_drain_stream_chunks(process.stderr))
@@ -679,13 +661,6 @@ class ACPNodeRunner:
             provider = role_config.worker_provider
             session_resp = await client.send_request("session/new", session_params)
             session_id = session_resp["sessionId"]
-            store.update_attempt_telemetry(
-                project_id,
-                mission_id,
-                spawn_ts,
-                task.id,
-                session_id=session_id,
-            )
             await self._maybe_set_mode(client, session_id, provider)
 
             prompt_result = await client.send_request(
@@ -728,17 +703,6 @@ class ACPNodeRunner:
                 except OSError:
                     pass
             await _close_subprocess(mcp_process, timeout=5)
-            store.update_attempt_telemetry(
-                project_id,
-                mission_id,
-                spawn_ts,
-                task.id,
-                completed_at=utc_now_iso(),
-                session_id=session_id,
-                stop_reason=prompt_stop_reason,
-                exit_code=worker_exit_code,
-                error=session_error,
-            )
 
         # 5) Parse and return.
         if handoff_path.exists():
@@ -766,16 +730,10 @@ class ACPNodeRunner:
         acp_command = role_config.worker_acp_command
         if not acp_command:
             raise RuntimeError(
-                "No ACP command for terminal reviewer. Set ZENITH_TERMINAL_REVIEWER_ACP_COMMAND."
+                "No ACP command for terminal reviewer. "
+                "Set ZENITH_TERMINAL_REVIEWER_ACP_COMMAND."
             )
         acp_command = _augment_acp_command(acp_command, role_config.worker_provider)
-        store.update_terminal_review_metadata(
-            project_id,
-            mission_id,
-            spawn_ts,
-            provider=role_config.worker_provider.name,
-            started_at=utc_now_iso(),
-        )
 
         workspace_dir = str(store.workspace_dir(project_id))
         project_bucket = str(store.zenith_dir(project_id))
@@ -839,9 +797,6 @@ class ACPNodeRunner:
         # submit_terminal_review -> spurious "terminal reviewer crashed". run_node
         # already does this for workers; run_terminal_review omitted it.
         stderr_task = asyncio.create_task(_drain_stream_chunks(process.stderr))
-        session_id: str | None = None
-        prompt_stop_reason: str | None = None
-        session_error: str | None = None
         try:
             await client.send_request(
                 "initialize",
@@ -861,28 +816,15 @@ class ACPNodeRunner:
             provider = role_config.worker_provider
             session_resp = await client.send_request("session/new", session_params)
             session_id = session_resp["sessionId"]
-            store.update_terminal_review_metadata(
-                project_id,
-                mission_id,
-                spawn_ts,
-                session_id=session_id,
-            )
             await self._maybe_set_mode(client, session_id, provider)
-            prompt_result = await client.send_request(
+            await client.send_request(
                 "session/prompt",
                 {
                     "prompt": [{"type": "text", "text": first_message}],
                     "sessionId": session_id,
                 },
             )
-            if isinstance(prompt_result, dict):
-                value = prompt_result.get("stopReason")
-                if isinstance(value, str):
-                    prompt_stop_reason = value
             await self._poll_attempt_file(report_path, timeout=2.0)
-        except Exception as exc:  # noqa: BLE001
-            session_error = str(exc)
-            raise
         finally:
             try:
                 stderr_task.cancel()
@@ -903,16 +845,6 @@ class ACPNodeRunner:
                 except OSError:
                     pass
             await _close_subprocess(mcp_process, timeout=5)
-            store.update_terminal_review_metadata(
-                project_id,
-                mission_id,
-                spawn_ts,
-                completed_at=utc_now_iso(),
-                session_id=session_id,
-                stop_reason=prompt_stop_reason,
-                exit_code=process.returncode,
-                error=session_error,
-            )
 
         if report_path.exists():
             return TerminalReviewHandoff.model_validate_json(report_path.read_text())
@@ -1021,12 +953,16 @@ class ACPNodeRunner:
                 return False
             await asyncio.sleep(0.1)
 
-    async def _maybe_set_mode(self, client: ACPClient, session_id: str, provider) -> None:
+    async def _maybe_set_mode(
+        self, client: ACPClient, session_id: str, provider
+    ) -> None:
         mode = getattr(provider, "acp_runtime_mode", None)
         if not mode:
             return
         try:
-            await client.send_request("session/set_mode", {"sessionId": session_id, "modeId": mode})
+            await client.send_request(
+                "session/set_mode", {"sessionId": session_id, "modeId": mode}
+            )
         except ACPError as exc:
             raise ACPError(
                 f"Failed to set ACP runtime mode {mode!r} for {provider.name}: {exc}"
@@ -1077,7 +1013,7 @@ class ACPNodeRunner:
                 "user_request": brief_text,
                 "workspace": workspace_dir,
                 "deliverable_roots": (
-                    "\n".join(f"- `{root}`" for root in deliverable_roots)
+                    "\n".join(f"- {json.dumps(root)}" for root in deliverable_roots)
                     if deliverable_roots
                     else "- (none; inspect the normal workspace only)"
                 ),
@@ -1142,7 +1078,9 @@ class ACPNodeRunner:
             return ValidateHandoff.model_validate(data)
         return WorkHandoff.model_validate(data)
 
-    def _synthesize_missing_handoff(self, task: Task, *, summary: str = "") -> NodeHandoff:
+    def _synthesize_missing_handoff(
+        self, task: Task, *, summary: str = ""
+    ) -> NodeHandoff:
         report = summary or "Agent session ended without calling end_node."
         if task.type == "validate":
             return ValidateHandoff(
@@ -1266,7 +1204,9 @@ class ACPTerminalReviewer:
         self.loader = AssetLoader(config)
         self.runner = ACPNodeRunner(config=config, loader=self.loader)
 
-    def review(self, project_id: str, mission_id: str, spawn_ts: str) -> TerminalReviewHandoff:
+    def review(
+        self, project_id: str, mission_id: str, spawn_ts: str
+    ) -> TerminalReviewHandoff:
         return _run_coro_blocking(
             self.runner.run_terminal_review(
                 project_id=project_id,

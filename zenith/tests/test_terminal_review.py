@@ -2,7 +2,6 @@
 
 See docs/v5/10-implementation-plan.md §2 Phase 7.
 """
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -47,13 +46,8 @@ def config(harness_home: Path) -> HarnessConfig:
     )
 
 
-def _task(
-    tid: str,
-    ttype: str,
-    targets: list[str],
-    skill: str | None = None,
-    depends_on: list[str] | None = None,
-) -> Task:
+def _task(tid: str, ttype: str, targets: list[str], skill: str | None = None,
+          depends_on: list[str] | None = None) -> Task:
     if skill is None and ttype != "gate":
         skill = "s"
     return Task(
@@ -67,16 +61,16 @@ def _task(
 
 
 def _simple_tl() -> TaskList:
-    return TaskList(
-        tasks=[
-            _task("w1", "work", ["VAL-001"]),
-            _task("v1", "validate", ["VAL-001"], skill="aud", depends_on=["w1"]),
-            _task("g1", "gate", ["VAL-001"], depends_on=["v1"]),
-        ]
-    )
+    return TaskList(tasks=[
+        _task("w1", "work", ["VAL-001"]),
+        _task("v1", "validate", ["VAL-001"], skill="aud", depends_on=["w1"]),
+        _task("g1", "gate", ["VAL-001"], depends_on=["v1"]),
+    ])
 
 
-def _start_and_seed_contract(controller: ProjectController, workspace: Path) -> str:
+def _start_and_seed_contract(
+    controller: ProjectController, workspace: Path
+) -> str:
     """Run start_project, then seed mission-001 contract VAL-001 inside the bucket."""
     controller.start_project("brief", str(workspace))
     pid = controller.store.list_projects()[0].id
@@ -98,7 +92,9 @@ def _responder(req: DispatchRequest) -> NodeHandoff:
 
 
 class TestCleanReview:
-    def test_clean_review_seals_done(self, config: HarnessConfig, workspace: Path) -> None:
+    def test_clean_review_seals_done(
+        self, config: HarnessConfig, workspace: Path
+    ) -> None:
         controller = ProjectController(
             config,
             MockDispatcher(_responder),
@@ -108,26 +104,19 @@ class TestCleanReview:
         controller.submit_plan(pid, _simple_tl())
         # First advance: gate_checkpoint
         env = controller.advance_project(pid)
-        telemetry_paths = sorted(
-            controller.store.attempt_telemetry_runtime_dir(pid, "mission-001").glob("*.json")
-        )
-        assert len(telemetry_paths) == 2
-        telemetry = [
-            controller.store.load_attempt_telemetry(
-                pid,
-                "mission-001",
-                path.stem.split("__", 1)[0],
-                path.stem.split("__", 1)[1],
-            )
-            for path in telemetry_paths
-        ]
-        assert all(item is not None and item.completed_at for item in telemetry)
         items = controller.store.load_attention(pid)
-        controller.decide_attention(pid, [Decision(item_id=items[0].id, action="continue")])
+        controller.decide_attention(
+            pid, [Decision(item_id=items[0].id, action="continue")]
+        )
         env = controller.advance_project(pid)
         assert env.state.state == "mission_running"
-        env = controller.end_mission(pid)
+        report = controller.store.mission_dir(pid, "mission-001") / "evidence" / "report.md"
+        report.parent.mkdir(parents=True)
+        report.write_text("final report")
+        env = controller.end_mission(pid, [str(report)])
         assert env.state.state == "done"
+        config = controller.store.load_terminal_review_config(pid, "mission-001")
+        assert config.deliverable_roots == [str(report.resolve())]
         # Closeout written
         closeout = controller.store.mission_dir(pid, "mission-001") / "closeout.md"
         assert closeout.exists()
@@ -154,7 +143,9 @@ class TestGapsTransition:
         env = controller.advance_project(pid)
         assert env.state.state == "attention_needed"
         items = controller.store.load_attention(pid)
-        controller.decide_attention(pid, [Decision(item_id=items[0].id, action="continue")])
+        controller.decide_attention(
+            pid, [Decision(item_id=items[0].id, action="continue")]
+        )
         env = controller.advance_project(pid)
         assert env.state.state == "mission_running"
         controller.end_mission(pid)
@@ -162,85 +153,18 @@ class TestGapsTransition:
         assert review_dir.exists() and any(review_dir.iterdir())
         # Resolve via next_mission
         items = controller.store.load_attention(pid)
-        controller.decide_attention(pid, [Decision(item_id=items[0].id, action="next_mission")])
+        controller.decide_attention(
+            pid, [Decision(item_id=items[0].id, action="next_mission")]
+        )
         # mission-002 should be the new current mission
         record = ProjectStore(config).load_project(pid)
         assert record.current_mission_id == "mission-002"
 
-    def test_unchanged_inputs_block_duplicate_review(
-        self, config: HarnessConfig, workspace: Path
-    ) -> None:
-        reviewer = MockTerminalReviewer(
-            TerminalReviewHandoff(done=False, report="GAP-001: report missing")
-        )
-        controller = ProjectController(config, MockDispatcher(_responder), reviewer)
-        pid = _start_and_seed_contract(controller, workspace)
-        controller.submit_plan(pid, _simple_tl())
-        controller.advance_project(pid)
-        items = controller.store.load_attention(pid)
-        controller.decide_attention(pid, [Decision(item_id=items[0].id, action="continue")])
-        controller.advance_project(pid)
-
-        controller.end_mission(pid)
-        assert len(reviewer.calls) == 1
-        items = controller.store.load_attention(pid)
-        controller.decide_attention(pid, [Decision(item_id=items[0].id, action="continue")])
-        env = controller.end_mission(pid)
-
-        assert env.state.state == "attention_needed"
-        assert len(reviewer.calls) == 1
-        conflict = controller.store.load_attention(pid)[0]
-        assert conflict.kind == "terminal_review_conflict"
-        assert "observable inputs are unchanged" in conflict.report
-
-        controller.decide_attention(pid, [Decision(item_id=conflict.id, action="continue")])
-        env = controller.end_mission(pid, force_terminal_review=True)
-        assert env.state.state == "attention_needed"
-        assert len(reviewer.calls) == 2
-        assert (
-            len(
-                list(
-                    controller.store.terminal_review_metadata_dir(pid, "mission-001").glob("*.json")
-                )
-            )
-            == 2
-        )
-
-    def test_changed_declared_deliverable_permits_fresh_review(
-        self, config: HarnessConfig, workspace: Path
-    ) -> None:
-        reviewer = MockTerminalReviewer(
-            TerminalReviewHandoff(done=False, report="GAP-001: report incomplete")
-        )
-        controller = ProjectController(config, MockDispatcher(_responder), reviewer)
-        pid = _start_and_seed_contract(controller, workspace)
-        report = controller.store.mission_dir(pid, "mission-001") / "evidence" / "report.md"
-        report.parent.mkdir(parents=True)
-        report.write_text("version one")
-        controller.submit_plan(pid, _simple_tl())
-        controller.advance_project(pid)
-        items = controller.store.load_attention(pid)
-        controller.decide_attention(pid, [Decision(item_id=items[0].id, action="continue")])
-        controller.advance_project(pid)
-
-        controller.end_mission(pid, [str(report)])
-        items = controller.store.load_attention(pid)
-        controller.decide_attention(pid, [Decision(item_id=items[0].id, action="continue")])
-        report.write_text("version two")
-        env = controller.end_mission(pid)
-
-        assert env.state.state == "attention_needed"
-        assert len(reviewer.calls) == 2
-        metadata_paths = list(
-            controller.store.terminal_review_metadata_dir(pid, "mission-001").glob("*.json")
-        )
-        assert len(metadata_paths) == 2
-        saved = controller.store.load_terminal_review_config(pid, "mission-001")
-        assert saved.deliverable_roots == [str(report.resolve())]
-
 
 class TestAbortRoundtripFromTerminalReview:
-    def test_abort_via_decision(self, config: HarnessConfig, workspace: Path) -> None:
+    def test_abort_via_decision(
+        self, config: HarnessConfig, workspace: Path
+    ) -> None:
         reviewer = MockTerminalReviewer(
             TerminalReviewHandoff(done=False, report="blocking gap: x\nbrief: y")
         )
@@ -250,7 +174,9 @@ class TestAbortRoundtripFromTerminalReview:
         env = controller.advance_project(pid)
         assert env.state.state == "attention_needed"
         items = controller.store.load_attention(pid)
-        controller.decide_attention(pid, [Decision(item_id=items[0].id, action="continue")])
+        controller.decide_attention(
+            pid, [Decision(item_id=items[0].id, action="continue")]
+        )
         env = controller.advance_project(pid)
         assert env.state.state == "mission_running"
         controller.end_mission(pid)

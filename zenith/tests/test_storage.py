@@ -1,5 +1,4 @@
 """Storage layer tests. See specs/memory_v2/PRODUCT.md for layout."""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,14 +8,12 @@ import pytest
 from zenith_harness.config import HarnessConfig
 from zenith_harness.models import (
     AttentionItemInternal,
-    AttemptTelemetry,
     Decision,
     Task,
     TaskList,
     TaskStateFile,
-    TerminalReviewHandoff,
     TerminalReviewConfig,
-    TerminalReviewMetadata,
+    TerminalReviewHandoff,
     ValidateHandoff,
     ValidationItem,
     WorkHandoff,
@@ -65,12 +62,12 @@ class TestProjectLifecycle:
         # Runtime
         assert (runtime / "project.json").exists()
         assert (runtime / "missions").is_dir()
-        assert record.runtime_identity is not None
-        assert record.runtime_identity.version == "0.1.0"
         # Workspace stays clean of .zenith/
         assert not (workspace / ".zenith").exists()
 
-    def test_workspace_gitignore_untouched(self, store: ProjectStore, workspace: Path) -> None:
+    def test_workspace_gitignore_untouched(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
         gitignore = workspace / ".gitignore"
         gitignore.write_text("node_modules/\n")
         original = gitignore.read_text()
@@ -88,10 +85,9 @@ class TestProjectLifecycle:
             assert link.resolve() == skills_target
         root_md = workspace / "AGENTS.md"
         assert root_md.is_symlink()
-        assert (
-            root_md.resolve()
-            == (harness_home / "projects" / "p1" / ".zenith" / "AGENTS.md").resolve()
-        )
+        assert root_md.resolve() == (
+            harness_home / "projects" / "p1" / ".zenith" / "AGENTS.md"
+        ).resolve()
 
     def test_existing_workspace_agents_md_is_preserved(
         self, store: ProjectStore, workspace: Path
@@ -120,7 +116,9 @@ class TestProjectLifecycle:
 
         assert skills_dir.is_dir()
         assert not skills_dir.is_symlink()
-        assert (bucket_skills / "project-skill" / "SKILL.md").read_text() == ("# Project skill\n")
+        assert (bucket_skills / "project-skill" / "SKILL.md").read_text() == (
+            "# Project skill\n"
+        )
         assert (skills_dir / "scrutiny-validator" / "SKILL.md").exists()
 
     def test_sync_workspace_skill_surfaces_updates_preserved_host_dir(
@@ -151,7 +149,9 @@ class TestProjectLifecycle:
         self, store: ProjectStore, workspace: Path, harness_home: Path, host: str
     ) -> None:
         skills_dir = workspace / host / "skills"
-        bundled_skill = store.config.bundled_dir / "skills" / "scrutiny-validator" / "SKILL.md"
+        bundled_skill = (
+            store.config.bundled_dir / "skills" / "scrutiny-validator" / "SKILL.md"
+        )
         seeded_skill = skills_dir / "scrutiny-validator" / "SKILL.md"
         seeded_skill.parent.mkdir(parents=True)
         seeded_skill.write_text(bundled_skill.read_text())
@@ -159,13 +159,14 @@ class TestProjectLifecycle:
         store.create_project("brief", workspace, project_id="p1")
 
         assert skills_dir.is_symlink()
-        assert (
-            skills_dir.resolve()
-            == (harness_home / "projects" / "p1" / ".zenith" / "skills").resolve()
-        )
+        assert skills_dir.resolve() == (
+            harness_home / "projects" / "p1" / ".zenith" / "skills"
+        ).resolve()
         assert (skills_dir / "scrutiny-validator" / "SKILL.md").exists()
 
-    def test_init_is_idempotent(self, store: ProjectStore, workspace: Path) -> None:
+    def test_init_is_idempotent(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
         store.create_project("brief", workspace, project_id="p1")
         zenith = store.zenith_dir("p1")
         original_brief = (zenith / "brief.md").read_text()
@@ -184,22 +185,27 @@ class TestProjectLifecycle:
         dangling.symlink_to(tmp_path / "does-not-exist")
         store.create_project("brief", workspace, project_id="p1")
         assert dangling.is_symlink() and dangling.exists()
-        assert (
-            dangling.resolve()
-            == (harness_home / "projects" / "p1" / ".zenith" / "skills").resolve()
-        )
+        assert dangling.resolve() == (
+            harness_home / "projects" / "p1" / ".zenith" / "skills"
+        ).resolve()
 
-    def test_load_project_roundtrip(self, store: ProjectStore, workspace: Path) -> None:
+    def test_load_project_roundtrip(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
         store.create_project("brief", workspace, project_id="p1")
         loaded = store.load_project("p1")
         assert loaded.id == "p1"
         assert loaded.workspace_dir == str(workspace.resolve())
 
-    def test_missing_workspace_rejected(self, store: ProjectStore, tmp_path: Path) -> None:
+    def test_missing_workspace_rejected(
+        self, store: ProjectStore, tmp_path: Path
+    ) -> None:
         with pytest.raises(FileNotFoundError):
             store.create_project("brief", tmp_path / "ghost", project_id="p1")
 
-    def test_list_projects(self, store: ProjectStore, workspace: Path, tmp_path: Path) -> None:
+    def test_list_projects(
+        self, store: ProjectStore, workspace: Path, tmp_path: Path
+    ) -> None:
         ws2 = tmp_path / "ws2"
         ws2.mkdir()
         store.create_project("a", workspace, project_id="a-pid")
@@ -209,14 +215,20 @@ class TestProjectLifecycle:
 
 
 class TestTaskListAndContract:
-    def test_save_and_load_task_list(self, store: ProjectStore, workspace: Path) -> None:
+    def test_save_and_load_task_list(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
         store.create_project("brief", workspace, project_id="p1")
-        tl = TaskList(tasks=[Task(id="w1", type="work", body="b", targets=["VAL-001"], skill="s")])
+        tl = TaskList(tasks=[
+            Task(id="w1", type="work", body="b", targets=["VAL-001"], skill="s")
+        ])
         store.save_task_list("p1", "mission-001", tl)
         back = store.load_task_list("p1", "mission-001")
         assert back == tl
 
-    def test_list_contract_assertions(self, store: ProjectStore, workspace: Path) -> None:
+    def test_list_contract_assertions(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
         store.create_project("brief", workspace, project_id="p1")
         d = store.ensure_contract_dir("p1", "mission-001")
         (d / "VAL-001.md").write_text("body 1\n")
@@ -227,7 +239,9 @@ class TestTaskListAndContract:
             "VAL-002",
         ]
 
-    def test_load_contract_assertion(self, store: ProjectStore, workspace: Path) -> None:
+    def test_load_contract_assertion(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
         store.create_project("brief", workspace, project_id="p1")
         d = store.ensure_contract_dir("p1", "mission-001")
         (d / "VAL-001.md").write_text("Hello.\n")
@@ -252,7 +266,9 @@ class TestTaskState:
 
 
 class TestAttempts:
-    def test_roundtrip_work(self, store: ProjectStore, workspace: Path) -> None:
+    def test_roundtrip_work(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
         store.create_project("brief", workspace, project_id="p1")
         h = WorkHandoff(node_id="w1", done=True, report="done", request_attention=False)
         ts = utc_now_filesafe()
@@ -268,7 +284,9 @@ class TestAttempts:
         assert md_path.exists()
         assert md_path.parent == store.attempts_dir("p1", "mission-001")
 
-    def test_roundtrip_validate(self, store: ProjectStore, workspace: Path) -> None:
+    def test_roundtrip_validate(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
         store.create_project("brief", workspace, project_id="p1")
         h = ValidateHandoff(
             node_id="v1",
@@ -283,7 +301,9 @@ class TestAttempts:
         assert isinstance(back, ValidateHandoff)
         assert back.items[0].item_id == "VAL-001"
 
-    def test_idempotent_overwrite(self, store: ProjectStore, workspace: Path) -> None:
+    def test_idempotent_overwrite(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
         store.create_project("brief", workspace, project_id="p1")
         h = WorkHandoff(node_id="w1", done=True, report="v1")
         ts = utc_now_filesafe()
@@ -294,14 +314,13 @@ class TestAttempts:
         assert isinstance(back, WorkHandoff)
         assert back.report == "v2"
 
-    def test_list_filters_by_node(self, store: ProjectStore, workspace: Path) -> None:
+    def test_list_filters_by_node(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
         store.create_project("brief", workspace, project_id="p1")
         for ts, nid in [("2026-01-01T00-00-00Z", "w1"), ("2026-01-02T00-00-00Z", "w2")]:
             store.save_attempt(
-                "p1",
-                "mission-001",
-                ts,
-                nid,
+                "p1", "mission-001", ts, nid,
                 WorkHandoff(node_id=nid, done=True, report=""),
             )
         records = store.list_attempts("p1", "mission-001", node_id="w1")
@@ -309,7 +328,9 @@ class TestAttempts:
 
 
 class TestAttention:
-    def test_save_and_load(self, store: ProjectStore, workspace: Path) -> None:
+    def test_save_and_load(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
         store.create_project("brief", workspace, project_id="p1")
         items = [
             AttentionItemInternal(
@@ -342,7 +363,9 @@ class TestAttention:
 
 
 class TestDecisions:
-    def test_appends_numbered_files(self, store: ProjectStore, workspace: Path) -> None:
+    def test_appends_numbered_files(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
         store.create_project("brief", workspace, project_id="p1")
         items = [
             AttentionItemInternal(
@@ -361,7 +384,9 @@ class TestDecisions:
 
 
 class TestTerminalReviews:
-    def test_save_and_path(self, store: ProjectStore, workspace: Path) -> None:
+    def test_save_and_path(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
         store.create_project("brief", workspace, project_id="p1")
         rep = TerminalReviewHandoff(done=False, report="One blocking gap")
         ts = utc_now_filesafe()
@@ -375,80 +400,63 @@ class TestTerminalReviews:
         assert path.suffix == ".md"
         json_path = store.terminal_review_path("p1", "mission-001", ts)
         assert json_path.exists()
-        assert json_path.parent == store.terminal_reviews_runtime_dir("p1", "mission-001")
+        assert json_path.parent == store.terminal_reviews_runtime_dir(
+            "p1", "mission-001"
+        )
         assert store.mission_runtime_dir("p1", "mission-001") in json_path.parents
         assert store.mission_dir("p1", "mission-001") not in json_path.parents
         assert json_path.suffix == ".json"
 
-    def test_config_roots_and_metadata_roundtrip(
-        self, store: ProjectStore, workspace: Path
-    ) -> None:
-        store.create_project("brief", workspace, project_id="p1")
-        deliverable = store.mission_dir("p1", "mission-001") / "evidence" / "report.md"
-        deliverable.parent.mkdir(parents=True)
-        deliverable.write_text("report")
-        roots = store.resolve_terminal_review_roots("p1", "mission-001", [str(deliverable)])
-        config = TerminalReviewConfig(deliverable_roots=roots)
-        store.save_terminal_review_config("p1", "mission-001", config)
-        assert store.load_terminal_review_config("p1", "mission-001") == config
-
-        metadata = TerminalReviewMetadata(
-            spawn_ts="2026-07-20T00-00-00Z",
-            input_fingerprint="abc",
-            deliverable_roots=roots,
-            started_at="2026-07-20T00:00:00Z",
-        )
-        store.save_terminal_review_metadata("p1", "mission-001", metadata)
-        loaded = store.latest_terminal_review_metadata("p1", "mission-001")
-        assert loaded == metadata
-
-    def test_forbids_history_and_escaping_symlinks(
+    def test_declared_roots_are_narrow_and_persisted(
         self, store: ProjectStore, workspace: Path
     ) -> None:
         store.create_project("brief", workspace, project_id="p1")
         mission = store.mission_dir("p1", "mission-001")
-        attempts = mission / "attempts"
-        attempts.mkdir(parents=True)
-        with pytest.raises(ValueError, match="forbidden mission artifact"):
-            store.resolve_terminal_review_roots("p1", "mission-001", [str(attempts)])
+        report = mission / "evidence" / "report.md"
+        report.parent.mkdir(parents=True)
+        report.write_text("report")
 
+        roots = store.resolve_terminal_review_roots(
+            "p1", "mission-001", [str(report)]
+        )
+        config = TerminalReviewConfig(deliverable_roots=roots)
+        store.save_terminal_review_config("p1", "mission-001", config)
+        assert store.load_terminal_review_config("p1", "mission-001") == config
+
+        with pytest.raises(ValueError, match="forbidden mission artifact"):
+            store.resolve_terminal_review_roots("p1", "mission-001", [str(mission)])
+        with pytest.raises(ValueError, match="forbidden workspace artifact"):
+            store.resolve_terminal_review_roots("p1", "mission-001", [str(workspace)])
+
+    def test_declared_roots_reject_escaping_or_injecting_paths(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        mission = store.mission_dir("p1", "mission-001")
         report_dir = mission / "evidence" / "report"
         report_dir.mkdir(parents=True)
         (report_dir / "escape").symlink_to(store.zenith_dir("p1") / "MEMORY.md")
         with pytest.raises(ValueError, match="symlink outside"):
-            store.resolve_terminal_review_roots("p1", "mission-001", [str(report_dir)])
+            store.resolve_terminal_review_roots(
+                "p1", "mission-001", [str(report_dir)]
+            )
 
-
-class TestAttemptTelemetry:
-    def test_roundtrip_and_update(self, store: ProjectStore, workspace: Path) -> None:
-        store.create_project("brief", workspace, project_id="p1")
-        telemetry = AttemptTelemetry(
-            project_id="p1",
-            mission_id="mission-001",
-            node_id="w1",
-            task_type="work",
-            spawn_ts="2026-07-20T00-00-00Z",
-            queued_at="2026-07-20T00:00:00Z",
-        )
-        store.save_attempt_telemetry(telemetry)
-        updated = store.update_attempt_telemetry(
-            "p1",
-            "mission-001",
-            telemetry.spawn_ts,
-            "w1",
-            session_id="session-1",
-            completed_at="2026-07-20T00:01:00Z",
-            done=True,
-        )
-        assert updated is not None
-        assert updated.session_id == "session-1"
-        assert updated.done is True
+        bad_name = mission / "evidence" / "report\ninjected.md"
+        bad_name.write_text("report")
+        with pytest.raises(ValueError, match="control characters"):
+            store.resolve_terminal_review_roots(
+                "p1", "mission-001", [str(bad_name)]
+            )
 
 
 class TestSeal:
-    def test_writes_closeout(self, store: ProjectStore, workspace: Path) -> None:
+    def test_writes_closeout(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
         store.create_project("brief", workspace, project_id="p1")
-        path = store.seal_mission("p1", "mission-001", status="done", body="Everything shipped.")
+        path = store.seal_mission(
+            "p1", "mission-001", status="done", body="Everything shipped."
+        )
         text = path.read_text()
         assert "status: done" in text and "Everything shipped." in text
         assert path == store.mission_dir("p1", "mission-001") / "closeout.md"

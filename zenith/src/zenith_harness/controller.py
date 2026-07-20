@@ -8,7 +8,6 @@ See `specs/task_list/PRODUCT.md`. The controller owns:
 
 The coordinator is constructed per-invocation; it has no in-memory state.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -79,7 +78,9 @@ class ProjectController:
         mission_id = self.store.generate_mission_id(1)
         record.current_mission_id = mission_id
         self.store.save_project(record)
-        self.store.save_state(record.id, MissionPlanning(mission_id=mission_id))
+        self.store.save_state(
+            record.id, MissionPlanning(mission_id=mission_id)
+        )
         return self._build_envelope(record.id, dag_mode="none")
 
     def submit_plan(self, project_id: str, task_list: TaskList) -> Envelope:
@@ -100,7 +101,9 @@ class ProjectController:
             )
         errs = validate_task_list_submission(ids, task_list)
         if errs:
-            raise ToolError("invalid_task_list", "task list validation failed", details=errs)
+            raise ToolError(
+                "invalid_task_list", "task list validation failed", details=errs
+            )
 
         self.store.save_task_list(project_id, mid, task_list)
         task_state = TaskStateFile()
@@ -135,11 +138,7 @@ class ProjectController:
         return self._build_envelope(project_id, dag_mode="frontier")
 
     def end_mission(
-        self,
-        project_id: str,
-        deliverable_roots: list[str] | None = None,
-        *,
-        force_terminal_review: bool = False,
+        self, project_id: str, deliverable_roots: list[str] | None = None
     ) -> Envelope:
         state = self._require_state(project_id)
         if not isinstance(state, MissionRunning):
@@ -160,11 +159,12 @@ class ProjectController:
             )
         except ValueError as exc:
             raise ToolError("invalid_deliverable_roots", str(exc)) from exc
-        result = coordinator.close_mission(
-            state.mission_id,
-            deliverable_roots=resolved_roots,
-            force_terminal_review=force_terminal_review,
-        )
+        try:
+            result = coordinator.close_mission(
+                state.mission_id, deliverable_roots=resolved_roots
+            )
+        except ValueError as exc:
+            raise ToolError("invalid_deliverable_roots", str(exc)) from exc
         if result.kind == "idle":
             raise ToolError(
                 "mission_not_ready_to_close",
@@ -207,7 +207,9 @@ class ProjectController:
         mid = self._current_mission_id(record, state)
         if mid:
             try:
-                self.store.seal_mission(project_id, mid, status="aborted", body=reason)
+                self.store.seal_mission(
+                    project_id, mid, status="aborted", body=reason
+                )
             except FileNotFoundError:
                 pass
         self.store.clear_attention(project_id)
@@ -233,7 +235,9 @@ class ProjectController:
         seen: set[str] = set()
         for dec in decisions:
             if dec.item_id in seen:
-                errs.append(ValidationError("duplicate_decision", dec.item_id))
+                errs.append(
+                    ValidationError("duplicate_decision", dec.item_id)
+                )
             seen.add(dec.item_id)
         item_by_id = {it.id: it for it in open_items}
         for dec in decisions:
@@ -244,10 +248,7 @@ class ProjectController:
                 errs.append(
                     ValidationError("invalid_action", "retry is only valid for node_failed")
                 )
-            if dec.action == "next_mission" and it.kind not in (
-                "terminal_review",
-                "terminal_review_conflict",
-            ):
+            if dec.action == "next_mission" and it.kind != "terminal_review":
                 errs.append(
                     ValidationError(
                         "invalid_action",
@@ -263,7 +264,9 @@ class ProjectController:
                         )
                     )
                 elif dec.patch.is_empty:
-                    errs.append(ValidationError("empty_patch", dec.item_id))
+                    errs.append(
+                        ValidationError("empty_patch", dec.item_id)
+                    )
         return errs
 
     def _apply_decisions(
@@ -302,7 +305,9 @@ class ProjectController:
             task_state = self.store.load_task_state(project_id, mid)
             # A task superseded or cancelled by this same patch is already
             # marked `superseded` by apply_patch — do not reset it to pending.
-            retired_ids = set(decision.patch.supersede.keys()) | set(decision.patch.cancel)
+            retired_ids = (
+                set(decision.patch.supersede.keys()) | set(decision.patch.cancel)
+            )
             if kind in ("node_failed", "gate_failed") and item.node_id:
                 if item.node_id not in retired_ids:
                     task_state.set_status(item.node_id, "pending")
@@ -321,7 +326,7 @@ class ProjectController:
                 ts.set_status(item.node_id, "cleared")
                 self.store.save_task_state(project_id, mid, ts)
                 return MissionRunning(mission_id=mid)
-            if kind in ("terminal_review", "terminal_review_conflict"):
+            if kind == "terminal_review":
                 return None
             return MissionRunning(mission_id=mid)
 
@@ -347,7 +352,9 @@ class ProjectController:
         self.store.save_project(record)
         return MissionPlanning(mission_id=new_mid)
 
-    def _apply_task_list_patch(self, project_id: str, mid: str, patch: TaskListPatch) -> None:
+    def _apply_task_list_patch(
+        self, project_id: str, mid: str, patch: TaskListPatch
+    ) -> None:
         tl = self.store.load_task_list(project_id, mid)
         task_state = self.store.load_task_state(project_id, mid)
         contract_state = self.store.load_contract_state(project_id, mid)
@@ -363,7 +370,9 @@ class ProjectController:
             new_contract_ids_on_disk=new_on_disk,
         )
         if errs:
-            raise ToolError("invalid_patch", "patch validation failed", details=errs)
+            raise ToolError(
+                "invalid_patch", "patch validation failed", details=errs
+            )
         self.store.save_task_list(project_id, mid, patched_tl)
         self.store.save_task_state(project_id, mid, patched_state)
         cs = self.store.load_contract_state(project_id, mid)
@@ -416,7 +425,6 @@ class ProjectController:
 
 def _make_pending():
     from .models import ContractStateEntry
-
     return ContractStateEntry()
 
 

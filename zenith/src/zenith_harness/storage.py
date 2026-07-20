@@ -13,11 +13,9 @@ directory, Zenith preserves it and copies missing bucket skills into it.
 
 See `specs/memory_v2/PRODUCT.md` and `specs/task_list/PRODUCT.md`.
 """
-
 from __future__ import annotations
 
 import json
-import hashlib
 import os
 import re
 import shutil
@@ -29,20 +27,17 @@ from .config import HarnessConfig
 from .models import (
     AttentionFile,
     AttentionItemInternal,
-    AttemptTelemetry,
     ContractStateFile,
     Decision,
     ProjectRecord,
     ProjectState,
     TaskList,
     TaskStateFile,
-    TerminalReviewHandoff,
     TerminalReviewConfig,
-    TerminalReviewMetadata,
+    TerminalReviewHandoff,
     ValidateHandoff,
     WorkHandoff,
 )
-from .runtime_identity import detect_runtime_identity
 
 # ---------------------------------------------------------------------------
 # Primitives
@@ -76,7 +71,9 @@ def atomic_write_text(path: str | Path, content: str) -> None:
 
 
 def atomic_write_json(path: str | Path, payload: object) -> None:
-    atomic_write_text(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+    atomic_write_text(
+        path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+    )
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
@@ -85,65 +82,6 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
     except ValueError:
         return False
     return True
-
-
-def _file_digest(path: Path) -> str | None:
-    if not path.is_file():
-        return None
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _tree_manifest(root: Path, *, content_hash_budget: int = 0) -> list[tuple[object, ...]]:
-    if root.is_file():
-        stat = root.stat()
-        digest = _file_digest(root) if stat.st_size <= content_hash_budget else None
-        return [(root.name, stat.st_size, stat.st_mtime_ns, digest)]
-    excluded = {
-        ".git",
-        ".zenith",
-        ".zenith-runtime",
-        ".agents",
-        ".claude",
-        ".codex",
-        ".pytest_cache",
-        ".mypy_cache",
-        ".ruff_cache",
-        ".venv",
-        "__pycache__",
-        "node_modules",
-    }
-    rows: list[tuple[object, ...]] = []
-    remaining_hash_bytes = content_hash_budget
-    for path in sorted(root.rglob("*")):
-        try:
-            relative = path.relative_to(root)
-        except ValueError:
-            continue
-        if any(part in excluded for part in relative.parts):
-            continue
-        if relative == Path("AGENTS.md"):
-            continue
-        if path.is_file():
-            stat = path.stat()
-            digest = None
-            if stat.st_size <= remaining_hash_bytes:
-                digest = _file_digest(path)
-                remaining_hash_bytes -= stat.st_size
-            rows.append(
-                (
-                    relative.as_posix(),
-                    stat.st_size,
-                    stat.st_mtime_ns,
-                    digest,
-                )
-            )
-        elif path.is_symlink():
-            rows.append((relative.as_posix(), "symlink", os.readlink(path)))
-    return rows
 
 
 def attempt_to_markdown(handoff: WorkHandoff | ValidateHandoff) -> str:
@@ -299,7 +237,6 @@ class ProjectStore:
             id=pid,
             workspace_dir=str(ws),
             created_at=utc_now_iso(),
-            runtime_identity=detect_runtime_identity(),
         )
         atomic_write_json(runtime / "project.json", record.model_dump(mode="json"))
         return record
@@ -341,7 +278,9 @@ class ProjectStore:
                 continue
             try:
                 result.append(
-                    ProjectRecord.model_validate_json(project_json.read_text(encoding="utf-8"))
+                    ProjectRecord.model_validate_json(
+                        project_json.read_text(encoding="utf-8")
+                    )
                 )
             except Exception:
                 continue
@@ -358,7 +297,9 @@ class ProjectStore:
             return None
         from pydantic import TypeAdapter
 
-        return TypeAdapter(ProjectState).validate_json(path.read_text(encoding="utf-8"))
+        return TypeAdapter(ProjectState).validate_json(
+            path.read_text(encoding="utf-8")
+        )
 
     def save_state(self, project_id: str, state: ProjectState) -> None:
         atomic_write_json(
@@ -399,13 +340,17 @@ class ProjectStore:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    def list_contract_assertions(self, project_id: str, mission_id: str) -> list[str]:
+    def list_contract_assertions(
+        self, project_id: str, mission_id: str
+    ) -> list[str]:
         from .task_validation import parse_contract_dir
 
         ids, _ = parse_contract_dir(self.contract_dir(project_id, mission_id))
         return sorted(ids)
 
-    def contract_assertion_path(self, project_id: str, mission_id: str, assertion_id: str) -> Path:
+    def contract_assertion_path(
+        self, project_id: str, mission_id: str, assertion_id: str
+    ) -> Path:
         return self.contract_dir(project_id, mission_id) / f"{assertion_id}.md"
 
     def load_contract_assertion(
@@ -424,23 +369,32 @@ class ProjectStore:
             return TaskStateFile()
         return TaskStateFile.model_validate_json(path.read_text(encoding="utf-8"))
 
-    def save_task_state(self, project_id: str, mission_id: str, task_state: TaskStateFile) -> None:
+    def save_task_state(
+        self, project_id: str, mission_id: str, task_state: TaskStateFile
+    ) -> None:
         atomic_write_json(
             self.mission_runtime_dir(project_id, mission_id) / "task-state.json",
             task_state.model_dump(mode="json"),
         )
 
-    def load_contract_state(self, project_id: str, mission_id: str) -> ContractStateFile:
-        path = self.mission_runtime_dir(project_id, mission_id) / "contract-state.json"
+    def load_contract_state(
+        self, project_id: str, mission_id: str
+    ) -> ContractStateFile:
+        path = (
+            self.mission_runtime_dir(project_id, mission_id) / "contract-state.json"
+        )
         if not path.exists():
             return ContractStateFile()
-        return ContractStateFile.model_validate_json(path.read_text(encoding="utf-8"))
+        return ContractStateFile.model_validate_json(
+            path.read_text(encoding="utf-8")
+        )
 
     def save_contract_state(
         self, project_id: str, mission_id: str, contract_state: ContractStateFile
     ) -> None:
         atomic_write_json(
-            self.mission_runtime_dir(project_id, mission_id) / "contract-state.json",
+            self.mission_runtime_dir(project_id, mission_id)
+            / "contract-state.json",
             contract_state.model_dump(mode="json"),
         )
 
@@ -458,50 +412,6 @@ class ProjectStore:
         """Orchestrator-only attempt handoffs (worker-written JSON cursors)."""
         return self.mission_runtime_dir(project_id, mission_id) / "attempts"
 
-    def attempt_telemetry_runtime_dir(self, project_id: str, mission_id: str) -> Path:
-        return self.mission_runtime_dir(project_id, mission_id) / "attempt-telemetry"
-
-    def attempt_telemetry_path(
-        self, project_id: str, mission_id: str, spawn_ts: str, node_id: str
-    ) -> Path:
-        return (
-            self.attempt_telemetry_runtime_dir(project_id, mission_id)
-            / f"{spawn_ts}__{node_id}.json"
-        )
-
-    def save_attempt_telemetry(self, telemetry: AttemptTelemetry) -> Path:
-        path = self.attempt_telemetry_path(
-            telemetry.project_id,
-            telemetry.mission_id,
-            telemetry.spawn_ts,
-            telemetry.node_id,
-        )
-        atomic_write_json(path, telemetry.model_dump(mode="json"))
-        return path
-
-    def load_attempt_telemetry(
-        self, project_id: str, mission_id: str, spawn_ts: str, node_id: str
-    ) -> AttemptTelemetry | None:
-        path = self.attempt_telemetry_path(project_id, mission_id, spawn_ts, node_id)
-        if not path.exists():
-            return None
-        return AttemptTelemetry.model_validate_json(path.read_text(encoding="utf-8"))
-
-    def update_attempt_telemetry(
-        self,
-        project_id: str,
-        mission_id: str,
-        spawn_ts: str,
-        node_id: str,
-        **updates: object,
-    ) -> AttemptTelemetry | None:
-        current = self.load_attempt_telemetry(project_id, mission_id, spawn_ts, node_id)
-        if current is None:
-            return None
-        updated = AttemptTelemetry.model_validate({**current.model_dump(mode="python"), **updates})
-        self.save_attempt_telemetry(updated)
-        return updated
-
     def attempt_path(
         self,
         project_id: str,
@@ -512,7 +422,10 @@ class ProjectStore:
         """JSON handoff path — written by the worker MCP server (ZENITH_HANDOFF_PATH)
         and polled by the coordinator. Lives in the runtime cursor tree
         (.zenith-runtime/), not the durable .zenith/ record."""
-        return self.attempts_runtime_dir(project_id, mission_id) / f"{spawn_ts}__{node_id}.json"
+        return (
+            self.attempts_runtime_dir(project_id, mission_id)
+            / f"{spawn_ts}__{node_id}.json"
+        )
 
     def attempt_report_path(
         self,
@@ -586,10 +499,14 @@ class ProjectStore:
     def regressions_dir(self, project_id: str, mission_id: str) -> Path:
         return self.mission_dir(project_id, mission_id) / "regressions"
 
-    def regression_path(self, project_id: str, mission_id: str, assertion_id: str) -> Path:
+    def regression_path(
+        self, project_id: str, mission_id: str, assertion_id: str
+    ) -> Path:
         return self.regressions_dir(project_id, mission_id) / f"{assertion_id}.md"
 
-    def regression_entry_count(self, project_id: str, mission_id: str, assertion_id: str) -> int:
+    def regression_entry_count(
+        self, project_id: str, mission_id: str, assertion_id: str
+    ) -> int:
         """Count top-level (`## `) markdown headings as entries."""
         path = self.regression_path(project_id, mission_id, assertion_id)
         if not path.exists():
@@ -608,9 +525,13 @@ class ProjectStore:
         path = self.zenith_runtime_dir(project_id) / "attention.json"
         if not path.exists():
             return []
-        return AttentionFile.model_validate_json(path.read_text(encoding="utf-8")).items
+        return AttentionFile.model_validate_json(
+            path.read_text(encoding="utf-8")
+        ).items
 
-    def save_attention(self, project_id: str, items: list[AttentionItemInternal]) -> None:
+    def save_attention(
+        self, project_id: str, items: list[AttentionItemInternal]
+    ) -> None:
         atomic_write_json(
             self.zenith_runtime_dir(project_id) / "attention.json",
             AttentionFile(items=items).model_dump(mode="json"),
@@ -672,7 +593,9 @@ class ProjectStore:
             if dec.patch is not None and not dec.patch.is_empty:
                 parts.append("- patch:")
                 parts.append("```json")
-                parts.append(json.dumps(dec.patch.model_dump(mode="json", by_alias=True), indent=2))
+                parts.append(
+                    json.dumps(dec.patch.model_dump(mode="json", by_alias=True), indent=2)
+                )
                 parts.append("```")
             parts.append("")
         atomic_write_text(path, "\n".join(parts).rstrip() + "\n")
@@ -692,31 +615,26 @@ class ProjectStore:
         """Orchestrator-only terminal-review handoffs (reviewer-written JSON cursors)."""
         return self.mission_runtime_dir(project_id, mission_id) / "terminal-reviews"
 
-    def terminal_review_path(self, project_id: str, mission_id: str, spawn_ts: str) -> Path:
+    def terminal_review_path(
+        self, project_id: str, mission_id: str, spawn_ts: str
+    ) -> Path:
         """JSON path — written by the terminal-reviewer MCP server and polled by
         the coordinator. Lives in the runtime cursor tree (.zenith-runtime/),
         not the durable .zenith/ record."""
         return self.terminal_reviews_runtime_dir(project_id, mission_id) / f"{spawn_ts}.json"
 
-    def allocate_terminal_review_spawn_ts(self, project_id: str, mission_id: str, base: str) -> str:
-        candidate = base
-        sequence = 0
-        while (
-            self.terminal_review_path(project_id, mission_id, candidate).exists()
-            or self.terminal_review_metadata_path(project_id, mission_id, candidate).exists()
-        ):
-            sequence += 1
-            candidate = f"{base}-{sequence:04d}"
-        return candidate
-
-    def terminal_review_report_path(self, project_id: str, mission_id: str, spawn_ts: str) -> Path:
+    def terminal_review_report_path(
+        self, project_id: str, mission_id: str, spawn_ts: str
+    ) -> Path:
         """Agent-readable markdown mirror."""
         return self.terminal_reviews_dir(project_id, mission_id) / f"{spawn_ts}.md"
 
     def terminal_review_config_path(self, project_id: str, mission_id: str) -> Path:
         return self.mission_runtime_dir(project_id, mission_id) / "terminal-review-config.json"
 
-    def load_terminal_review_config(self, project_id: str, mission_id: str) -> TerminalReviewConfig:
+    def load_terminal_review_config(
+        self, project_id: str, mission_id: str
+    ) -> TerminalReviewConfig:
         path = self.terminal_review_config_path(project_id, mission_id)
         if not path.exists():
             return TerminalReviewConfig()
@@ -736,25 +654,25 @@ class ProjectStore:
         mission = self.mission_dir(project_id, mission_id).resolve()
         runtime = self.zenith_runtime_dir(project_id).resolve()
         forbidden = [
-            runtime,
-            self.zenith_dir(project_id).resolve() / "decisions",
-            self.zenith_dir(project_id).resolve() / "MEMORY.md",
-            mission / "contract",
-            mission / "attempts",
-            mission / "terminal-reviews",
-            mission / "closeout.md",
-        ]
-        workspace_forbidden = [
-            workspace / ".git",
-            workspace / ".zenith",
-            workspace / ".zenith-runtime",
-            workspace / ".agents",
-            workspace / ".claude",
-            workspace / ".codex",
-            workspace / "AGENTS.md",
+            (runtime, "mission"),
+            (self.zenith_dir(project_id).resolve() / "decisions", "mission"),
+            (self.zenith_dir(project_id).resolve() / "MEMORY.md", "mission"),
+            (mission / "contract", "mission"),
+            (mission / "attempts", "mission"),
+            (mission / "terminal-reviews", "mission"),
+            (mission / "closeout.md", "mission"),
+            (workspace / ".git", "workspace"),
+            (workspace / ".zenith", "workspace"),
+            (workspace / ".zenith-runtime", "workspace"),
+            (workspace / ".agents", "workspace"),
+            (workspace / ".claude", "workspace"),
+            (workspace / ".codex", "workspace"),
+            (workspace / "AGENTS.md", "workspace"),
         ]
         resolved: list[str] = []
         for raw in roots:
+            if any(ord(char) < 32 or ord(char) == 127 for char in raw):
+                raise ValueError("terminal-review deliverable path contains control characters")
             candidate = Path(raw).expanduser()
             if not candidate.is_absolute():
                 candidate = workspace / candidate
@@ -764,16 +682,18 @@ class ProjectStore:
                 raise ValueError(f"terminal-review deliverable does not exist: {raw}") from exc
             if not (_is_relative_to(target, workspace) or _is_relative_to(target, mission)):
                 raise ValueError(
-                    f"terminal-review deliverable must be inside the workspace or current mission: {raw}"
+                    "terminal-review deliverable must be inside the workspace or current "
+                    f"mission: {raw}"
                 )
-            if any(target == item or _is_relative_to(target, item) for item in forbidden):
-                raise ValueError(
-                    f"terminal-review deliverable is a forbidden mission artifact: {raw}"
-                )
-            if any(target == item or _is_relative_to(target, item) for item in workspace_forbidden):
-                raise ValueError(
-                    f"terminal-review deliverable is a forbidden workspace artifact: {raw}"
-                )
+            for item, label in forbidden:
+                if (
+                    target == item
+                    or _is_relative_to(target, item)
+                    or (target.is_dir() and _is_relative_to(item, target))
+                ):
+                    raise ValueError(
+                        f"terminal-review deliverable is a forbidden {label} artifact: {raw}"
+                    )
             if target.is_dir():
                 for nested in target.rglob("*"):
                     if not nested.is_symlink():
@@ -793,77 +713,6 @@ class ProjectStore:
             if value not in resolved:
                 resolved.append(value)
         return sorted(resolved)
-
-    def terminal_review_input_fingerprint(
-        self, project_id: str, mission_id: str, deliverable_roots: list[str]
-    ) -> str:
-        workspace = self.workspace_dir(project_id).resolve()
-        runtime_mission = self.mission_runtime_dir(project_id, mission_id)
-        payload = {
-            "brief": _file_digest(self.zenith_dir(project_id) / "brief.md"),
-            "tasks": _file_digest(runtime_mission / "tasks.json"),
-            "task_state": _file_digest(runtime_mission / "task-state.json"),
-            "contract_state": _file_digest(runtime_mission / "contract-state.json"),
-            "workspace_root": str(workspace),
-            "workspace": _tree_manifest(workspace),
-            "deliverables": [
-                {
-                    "root": root,
-                    "manifest": _tree_manifest(
-                        Path(root), content_hash_budget=64 * 1024 * 1024
-                    ),
-                }
-                for root in deliverable_roots
-            ],
-        }
-        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        return hashlib.sha256(encoded).hexdigest()
-
-    def terminal_review_metadata_dir(self, project_id: str, mission_id: str) -> Path:
-        return self.mission_runtime_dir(project_id, mission_id) / "terminal-review-metadata"
-
-    def terminal_review_metadata_path(
-        self, project_id: str, mission_id: str, spawn_ts: str
-    ) -> Path:
-        return self.terminal_review_metadata_dir(project_id, mission_id) / f"{spawn_ts}.json"
-
-    def save_terminal_review_metadata(
-        self, project_id: str, mission_id: str, metadata: TerminalReviewMetadata
-    ) -> Path:
-        path = self.terminal_review_metadata_path(project_id, mission_id, metadata.spawn_ts)
-        atomic_write_json(path, metadata.model_dump(mode="json"))
-        return path
-
-    def load_terminal_review_metadata(
-        self, project_id: str, mission_id: str, spawn_ts: str
-    ) -> TerminalReviewMetadata | None:
-        path = self.terminal_review_metadata_path(project_id, mission_id, spawn_ts)
-        if not path.exists():
-            return None
-        return TerminalReviewMetadata.model_validate_json(path.read_text(encoding="utf-8"))
-
-    def update_terminal_review_metadata(
-        self, project_id: str, mission_id: str, spawn_ts: str, **updates: object
-    ) -> TerminalReviewMetadata | None:
-        current = self.load_terminal_review_metadata(project_id, mission_id, spawn_ts)
-        if current is None:
-            return None
-        updated = TerminalReviewMetadata.model_validate(
-            {**current.model_dump(mode="python"), **updates}
-        )
-        self.save_terminal_review_metadata(project_id, mission_id, updated)
-        return updated
-
-    def latest_terminal_review_metadata(
-        self, project_id: str, mission_id: str
-    ) -> TerminalReviewMetadata | None:
-        directory = self.terminal_review_metadata_dir(project_id, mission_id)
-        if not directory.exists():
-            return None
-        paths = sorted(directory.glob("*.json"))
-        if not paths:
-            return None
-        return TerminalReviewMetadata.model_validate_json(paths[-1].read_text(encoding="utf-8"))
 
     def save_terminal_review(
         self,

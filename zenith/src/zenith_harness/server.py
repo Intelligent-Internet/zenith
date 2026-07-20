@@ -3,7 +3,6 @@
 See docs/v5/08-mcp-surface.md. Tool-surface isolation is structural:
 each mode registers a disjoint tool set on its own MCP server.
 """
-
 from __future__ import annotations
 
 import argparse
@@ -74,7 +73,8 @@ def create_worker_server() -> FastMCP:
     mcp = FastMCP(
         name="zenith-worker",
         instructions=(
-            "Worker MCP server. Mode: worker. 1 tool: end_node. Call exactly once before exiting."
+            "Worker MCP server. Mode: worker. 1 tool: end_node. "
+            "Call exactly once before exiting."
         ),
     )
     _register_worker_tools(mcp)
@@ -129,7 +129,9 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
     )
     async def start_project(
         brief: Annotated[str, Field(description="The user's ask in prose; goes to brief.md")],
-        workspace_dir: Annotated[str, Field(description="Absolute path to the user's workspace.")],
+        workspace_dir: Annotated[
+            str, Field(description="Absolute path to the user's workspace.")
+        ],
     ) -> dict[str, Any]:
         # No per-project lock: project_id does not exist until the call returns.
         try:
@@ -154,7 +156,11 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
         project_id: Annotated[str, Field(description="Project id from start_project.")],
         task_list: Annotated[
             TaskList,
-            Field(description=("Mission task list (tasks: list[Task] with depends_on).")),
+            Field(
+                description=(
+                    "Mission task list (tasks: list[Task] with depends_on)."
+                )
+            ),
         ],
     ) -> dict[str, Any]:
         async with await _project_lock(project_id):
@@ -210,31 +216,17 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
             Field(
                 default=None,
                 description=(
-                    "Exact existing product/report files or directories the independent "
-                    "terminal reviewer may inspect in addition to the normal workspace. "
-                    "Paths are security-checked and persisted for this mission."
+                    "Exact existing final-artifact files or directories the independent "
+                    "reviewer may inspect in addition to the normal workspace."
                 ),
             ),
         ] = None,
-        force_terminal_review: Annotated[
-            bool,
-            Field(
-                default=False,
-                description=(
-                    "Explicitly rerun despite unchanged observable inputs. Use only for a "
-                    "transient reviewer failure; unchanged retries are blocked by default."
-                ),
-            ),
-        ] = False,
     ) -> dict[str, Any]:
         async with await _project_lock(project_id):
             try:
                 return _to_payload(
                     await asyncio.to_thread(
-                        controller.end_mission,
-                        project_id,
-                        deliverable_roots,
-                        force_terminal_review=force_terminal_review,
+                        controller.end_mission, project_id, deliverable_roots
                     )
                 )
             except ToolError as exc:
@@ -276,7 +268,9 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
         project_id: Annotated[str, Field(description="Project id.")],
     ) -> dict[str, Any]:
         try:
-            return _to_payload(await asyncio.to_thread(controller.inspect_project, project_id))
+            return _to_payload(
+                await asyncio.to_thread(controller.inspect_project, project_id)
+            )
         except ToolError as exc:
             return _to_payload(exc)
 
@@ -321,12 +315,7 @@ def _register_worker_tools(mcp: FastMCP) -> None:
             bool,
             Field(description="True if the assigned work or validation audit completed."),
         ],
-        report: Annotated[
-            str,
-            Field(
-                description="Free-form handoff report. Severity tags are authoring discipline, not runtime triggers."
-            ),
-        ],
+        report: Annotated[str, Field(description="Free-form handoff report. Severity tags are authoring discipline, not runtime triggers.")],
         request_attention: Annotated[
             bool,
             Field(
@@ -407,7 +396,9 @@ def _register_terminal_reviewer_tools(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         path = os.environ.get("ZENITH_TERMINAL_REVIEW_PATH")
         if not path:
-            raise RuntimeError("ZENITH_TERMINAL_REVIEW_PATH not set in terminal-reviewer env")
+            raise RuntimeError(
+                "ZENITH_TERMINAL_REVIEW_PATH not set in terminal-reviewer env"
+            )
         review = TerminalReviewHandoff(done=done, report=report)
         atomic_write_json(path, review.model_dump(mode="json"))
         return {

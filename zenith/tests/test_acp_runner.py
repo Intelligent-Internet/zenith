@@ -5,7 +5,6 @@ We don't run a real `claude-agent-acp` here; we use the bundled
 mechanic. The worker MCP server subprocess is bypassed: the mock agent
 writes directly to ZENITH_HANDOFF_PATH itself.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -25,7 +24,7 @@ from zenith_harness.acp_runner import (
 from zenith_harness.providers import PROVIDERS
 from zenith_harness.assets import AssetLoader
 from zenith_harness.config import HarnessConfig
-from zenith_harness.models import AttemptTelemetry, Task, WorkHandoff
+from zenith_harness.models import Task, WorkHandoff
 from zenith_harness.storage import ProjectStore
 
 
@@ -71,7 +70,9 @@ def project_setup(config: HarnessConfig, workspace: Path):
     not shutil.which("python3") and not Path(sys.executable).exists(),
     reason="Python interpreter unavailable",
 )
-def test_run_node_with_mock_agent(config: HarnessConfig, project_setup, workspace: Path):
+def test_run_node_with_mock_agent(
+    config: HarnessConfig, project_setup, workspace: Path
+):
     """End-to-end via the mock agent (NO real worker MCP server subprocess —
     we point at a free port that nothing binds to and rely on the mock to
     write the handoff file itself).
@@ -81,16 +82,6 @@ def test_run_node_with_mock_agent(config: HarnessConfig, project_setup, workspac
     spawn_ts = "2026-05-17T00-00-00Z"
     handoff_path = store.attempt_path("p1", "mission-001", spawn_ts, "w1")
     handoff_path.parent.mkdir(parents=True, exist_ok=True)
-    store.save_attempt_telemetry(
-        AttemptTelemetry(
-            project_id="p1",
-            mission_id="mission-001",
-            node_id="w1",
-            task_type="work",
-            spawn_ts=spawn_ts,
-            queued_at="2026-05-17T00:00:00Z",
-        )
-    )
 
     os.environ["ZENITH_HANDOFF_PATH"] = str(handoff_path)
     os.environ["ZENITH_NODE_ID"] = task.id
@@ -101,8 +92,7 @@ def test_run_node_with_mock_agent(config: HarnessConfig, project_setup, workspac
 
         async def _no_op_server(*args, **kwargs):
             return await asyncio.create_subprocess_exec(
-                "sleep",
-                "30",
+                "sleep", "30",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -132,10 +122,6 @@ def test_run_node_with_mock_agent(config: HarnessConfig, project_setup, workspac
     assert handoff_path.exists()
     data = json.loads(handoff_path.read_text())
     assert data["node_id"] == "w1"
-    telemetry = store.load_attempt_telemetry("p1", "mission-001", spawn_ts, "w1")
-    assert telemetry is not None
-    assert telemetry.session_id is not None
-    assert telemetry.completed_at is not None
 
 
 def test_synthesize_missing_handoff_records_failure(
@@ -207,21 +193,3 @@ def test_terminal_review_path_naming(config: HarnessConfig, project_setup):
     assert "terminal-reviews" in p.parts
     # JSON handoff lives in the runtime cursor tree, not the durable .zenith record.
     assert ".zenith-runtime" in p.parts
-
-
-def test_terminal_reviewer_prompt_allows_only_declared_deliverables(
-    config: HarnessConfig, project_setup, workspace: Path
-) -> None:
-    store = project_setup
-    deliverable = store.mission_dir("p1", "mission-001") / "evidence" / "report.md"
-    deliverable.parent.mkdir(parents=True)
-    deliverable.write_text("report")
-    runner = ACPNodeRunner(config=config, loader=AssetLoader(config))
-    prompt = runner._render_terminal_reviewer_prompts(
-        project_bucket=str(store.zenith_dir("p1")),
-        workspace_dir=str(workspace),
-        deliverable_roots=[str(deliverable)],
-    )
-    assert str(deliverable) in prompt
-    assert "except exact declared deliverable roots" in prompt
-    assert "Do not inspect their parent directories or siblings" in prompt
