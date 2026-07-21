@@ -70,7 +70,7 @@ def test_max_parallel_one_uses_current_workspace(
         MockDispatcher(responder),
         MockTerminalReviewer(TerminalReviewHandoff(done=True, report="")),
     )
-    controller.start_project("Brief.", str(workspace))
+    controller.start_project("Brief.", str(workspace), "test-owner")
     pid = controller.store.list_projects()[0].id
     _write_contract(controller.store, pid, "mission-001", "VAL-A")
     _write_contract(controller.store, pid, "mission-001", "VAL-B")
@@ -102,7 +102,7 @@ def test_auto_merge_false_still_uses_current_workspace(
         MockDispatcher(responder),
         MockTerminalReviewer(TerminalReviewHandoff(done=True, report="")),
     )
-    controller.start_project("Brief.", str(workspace))
+    controller.start_project("Brief.", str(workspace), "test-owner")
     pid = controller.store.list_projects()[0].id
     _write_contract(controller.store, pid, "mission-001", "EXP-A")
     controller.submit_plan(
@@ -162,7 +162,7 @@ def test_serial_mode_batches_ready_gate_validators_before_more_work(
         MockDispatcher(responder),
         MockTerminalReviewer(TerminalReviewHandoff(done=True, report="")),
     )
-    controller.start_project("Brief.", str(workspace))
+    controller.start_project("Brief.", str(workspace), "test-owner")
     pid = controller.store.list_projects()[0].id
     _write_contract(controller.store, pid, "mission-001", "VAL-A")
     controller.submit_plan(
@@ -246,7 +246,7 @@ def test_serial_mode_prioritizes_remaining_gate_validator_before_more_work(
         MockDispatcher(responder),
         MockTerminalReviewer(TerminalReviewHandoff(done=True, report="")),
     )
-    controller.start_project("Brief.", str(workspace))
+    controller.start_project("Brief.", str(workspace), "test-owner")
     pid = controller.store.list_projects()[0].id
     _write_contract(controller.store, pid, "mission-001", "VAL-A")
     controller.submit_plan(
@@ -320,7 +320,7 @@ def test_parallel_fanout_dispatches_concurrently(
         MockDispatcher(responder),
         MockTerminalReviewer(TerminalReviewHandoff(done=True, report="")),
     )
-    controller.start_project("Brief.", str(workspace))
+    controller.start_project("Brief.", str(workspace), "test-owner")
     pid = controller.store.list_projects()[0].id
     _write_contract(controller.store, pid, "mission-001", "VAL-A")
     _write_contract(controller.store, pid, "mission-001", "VAL-B")
@@ -355,7 +355,7 @@ def test_parallel_work_tasks_run_in_current_workspace(
         MockDispatcher(responder),
         MockTerminalReviewer(TerminalReviewHandoff(done=True, report="")),
     )
-    controller.start_project("Brief.", str(workspace))
+    controller.start_project("Brief.", str(workspace), "test-owner")
     pid = controller.store.list_projects()[0].id
     _write_contract(controller.store, pid, "mission-001", "VAL-A")
     _write_contract(controller.store, pid, "mission-001", "VAL-B")
@@ -378,7 +378,7 @@ def test_parallel_non_git_workspace_runs_in_workspace(
         MockDispatcher(lambda r: WorkHandoff(node_id=r.task.id, done=True, report="")),
         MockTerminalReviewer(TerminalReviewHandoff(done=True, report="")),
     )
-    controller.start_project("Brief.", str(workspace))
+    controller.start_project("Brief.", str(workspace), "test-owner")
     pid = controller.store.list_projects()[0].id
     _write_contract(controller.store, pid, "mission-001", "VAL-A")
     controller.submit_plan(pid, TaskList(tasks=[_task("a", "VAL-A")]))
@@ -397,7 +397,7 @@ def test_reconcile_applies_multiple_running_attempts(
         MockDispatcher(lambda r: WorkHandoff(node_id=r.task.id, done=True, report="unused")),
         MockTerminalReviewer(TerminalReviewHandoff(done=True, report="")),
     )
-    controller.start_project("Brief.", str(workspace))
+    controller.start_project("Brief.", str(workspace), "test-owner")
     pid = controller.store.list_projects()[0].id
     _write_contract(controller.store, pid, "mission-001", "VAL-A")
     _write_contract(controller.store, pid, "mission-001", "VAL-B")

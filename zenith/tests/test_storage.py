@@ -496,6 +496,7 @@ class TestWorkspaceLease:
         assert payload["last_seen_at"]
         assert payload["host"]
         assert payload["pid"] > 0
+        assert payload["runtime_id"]
         marker = json.loads(
             (lease.path.parent / "claim.json").read_text(encoding="utf-8")
         )
@@ -635,6 +636,44 @@ class TestWorkspaceLease:
 
         with pytest.raises(WorkspaceLeaseConflict, match="explicit recovery"):
             store.claim_workspace_lease("p1", "owner-a")
+
+    def test_identityless_lease_has_audited_break_glass_recovery(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        lease_path = store.workspace_lease_path("p1")
+        lease_path.parent.mkdir(parents=True)
+
+        recovered = store.recover_workspace_lease_for_workspace(
+            workspace, "operator", "claim process died before identity publication"
+        )
+
+        assert recovered is None
+        assert not lease_path.parent.exists()
+        audit_path = store.config.harness_home / "leases" / "recovery-log.jsonl"
+        audit = [
+            json.loads(line)
+            for line in audit_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert audit[-2]["action"] == "identityless_recovery_authorized"
+        assert audit[-1]["action"] == "identityless_recovery_completed"
+
+    def test_recovery_refuses_different_boot_or_pid_namespace(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        lease = store.claim_workspace_lease("p1", "owner-a")
+        for name in ("claim.json", "owner.json"):
+            path = lease.path.parent / name
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["pid"] = 999_999_999
+            payload["runtime_id"] = "different-runtime"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+        with pytest.raises(WorkspaceLeaseConflict, match="boot or PID namespace"):
+            store.recover_workspace_lease_for_workspace(
+                workspace, "operator", "controller appears dead"
+            )
 
     def test_release_removes_abandoned_temp_files_atomically(
         self, store: ProjectStore, workspace: Path

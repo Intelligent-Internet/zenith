@@ -252,7 +252,7 @@ def test_smoke_hello_mission(
     )
 
     # 1) start_project
-    start_env = controller.start_project("smoke test brief", str(workspace))
+    start_env = controller.start_project("smoke test brief", str(workspace), "test-owner")
     pid = ProjectStore(config).list_projects()[0].id
     assert start_env.state.state == "mission_planning"
 
@@ -376,7 +376,7 @@ def _run_with_real_terminal_reviewer(
     reviewer = ACPTerminalReviewer(config)
     controller = ProjectController(config, dispatcher, reviewer)
 
-    controller.start_project("smoke test brief", str(workspace))
+    controller.start_project("smoke test brief", str(workspace), "test-owner")
     pid = ProjectStore(config).list_projects()[0].id
     _write_contract(workspace, "mission-001")
     controller.submit_plan(pid, _build_task_list())

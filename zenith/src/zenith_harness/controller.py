@@ -73,7 +73,7 @@ class ProjectController:
     # ------------------------------------------------------------------
 
     def start_project(
-        self, brief: str, workspace_dir: str, owner_id: str | None = None
+        self, brief: str, workspace_dir: str, owner_id: str
     ) -> Envelope:
         if not brief.strip():
             raise ToolError("invalid_brief", "brief is empty")
@@ -84,24 +84,22 @@ class ProjectController:
                 "workspace_dir must be an existing absolute directory",
             )
         project_id = self.store.generate_project_id(brief)
-        if owner_id is not None:
-            try:
-                self.store.claim_workspace_lease_for_workspace(
-                    workspace_dir, project_id, owner_id
-                )
-            except ValueError as exc:
-                raise ToolError("invalid_owner", str(exc)) from exc
-            except WorkspaceLeaseConflict as exc:
-                raise ToolError("workspace_owned", str(exc)) from exc
+        try:
+            self.store.claim_workspace_lease_for_workspace(
+                workspace_dir, project_id, owner_id
+            )
+        except ValueError as exc:
+            raise ToolError("invalid_owner", str(exc)) from exc
+        except WorkspaceLeaseConflict as exc:
+            raise ToolError("workspace_owned", str(exc)) from exc
         try:
             record = self.store.create_project(
                 brief, workspace_dir, project_id=project_id
             )
         except Exception:
-            if owner_id is not None:
-                self.store.release_workspace_lease_for_workspace(
-                    workspace_dir, project_id, owner_id
-                )
+            self.store.release_workspace_lease_for_workspace(
+                workspace_dir, project_id, owner_id
+            )
             raise
         mission_id = self.store.generate_mission_id(1)
         record.current_mission_id = mission_id
@@ -130,6 +128,8 @@ class ProjectController:
             self.store.claim_workspace_lease(project_id, owner_id)
         except ValueError as exc:
             raise ToolError("invalid_owner", str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise ToolError("invalid_workspace", str(exc)) from exc
         except WorkspaceLeaseConflict as exc:
             raise ToolError("workspace_owned", str(exc)) from exc
         record = self.store.load_project(project_id)
@@ -152,12 +152,14 @@ class ProjectController:
             self.store.release_workspace_lease(project_id, owner_id)
         except ValueError as exc:
             raise ToolError("invalid_owner", str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise ToolError("invalid_workspace", str(exc)) from exc
         except WorkspaceLeaseConflict as exc:
             raise ToolError("workspace_owned", str(exc)) from exc
 
     def recover_workspace_lease(
         self, workspace_dir: str, owner_id: str, reason: str
-    ) -> WorkspaceLease:
+    ) -> WorkspaceLease | None:
         try:
             return self.store.recover_workspace_lease_for_workspace(
                 workspace_dir, owner_id, reason
@@ -278,6 +280,8 @@ class ProjectController:
             self.store.claim_workspace_lease(project_id, owner_id)
         except ValueError as exc:
             raise ToolError("invalid_owner", str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise ToolError("invalid_workspace", str(exc)) from exc
         except WorkspaceLeaseConflict as exc:
             raise ToolError("workspace_owned", str(exc)) from exc
         record = self.store.load_project(project_id)
@@ -309,9 +313,44 @@ class ProjectController:
         try:
             self.store.release_workspace_lease(project_id, owner_id)
         except ValueError as exc:
-            raise ToolError("invalid_owner", str(exc)) from exc
+            self.store.append_workspace_lease_audit(
+                {
+                    "action": "abort_state_committed_lease_release_failed",
+                    "project_id": project_id,
+                    "owner_id": owner_id,
+                    "error": str(exc),
+                }
+            )
+            raise ToolError(
+                "abort_succeeded_lease_release_failed",
+                f"project state is aborted but lease release failed: {exc}",
+            ) from exc
+        except FileNotFoundError as exc:
+            self.store.append_workspace_lease_audit(
+                {
+                    "action": "abort_state_committed_lease_release_failed",
+                    "project_id": project_id,
+                    "owner_id": owner_id,
+                    "error": str(exc),
+                }
+            )
+            raise ToolError(
+                "abort_succeeded_lease_release_failed",
+                f"project state is aborted but lease release failed: {exc}",
+            ) from exc
         except WorkspaceLeaseConflict as exc:
-            raise ToolError("workspace_owned", str(exc)) from exc
+            self.store.append_workspace_lease_audit(
+                {
+                    "action": "abort_state_committed_lease_release_failed",
+                    "project_id": project_id,
+                    "owner_id": owner_id,
+                    "error": str(exc),
+                }
+            )
+            raise ToolError(
+                "abort_succeeded_lease_release_failed",
+                f"project state is aborted but lease release failed: {exc}",
+            ) from exc
         return envelope
 
     # ------------------------------------------------------------------

@@ -154,7 +154,7 @@ def _run_parallel_workspace_acp(
     dispatcher = ACPNodeDispatcher(config)
     controller = ProjectController(config, dispatcher, _CleanReviewer())
 
-    controller.start_project("parallel smoke", str(workspace))
+    controller.start_project("parallel smoke", str(workspace), "test-owner")
     store = ProjectStore(config)
     pid = store.list_projects()[0].id
 

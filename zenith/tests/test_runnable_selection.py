@@ -180,7 +180,7 @@ class TestSerialDispatchPicksFirstByListOrder:
             MockDispatcher(responder),
             MockTerminalReviewer(TerminalReviewHandoff(done=True, report="")),
         )
-        controller.start_project("Brief.", str(workspace))
+        controller.start_project("Brief.", str(workspace), "test-owner")
         pid = controller.store.list_projects()[0].id
         contract_dir = controller.store.ensure_contract_dir(pid, "mission-001")
         (contract_dir / "VAL-A.md").write_text("# VAL-A\n")

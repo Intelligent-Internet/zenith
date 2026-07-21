@@ -94,7 +94,7 @@ def _seed_project(
     mission_id: str = "mission-001",
     assertion: str = "VAL-001",
 ) -> str:
-    controller.start_project(brief, str(workspace))
+    controller.start_project(brief, str(workspace), "test-owner")
     pid = controller.store.list_projects()[0].id
     contract_dir = controller.store.ensure_contract_dir(pid, mission_id)
     (contract_dir / f"{assertion}.md").write_text(
@@ -395,7 +395,7 @@ class TestSubmitPlanValidation:
             MockTerminalReviewer(TerminalReviewHandoff(done=True, report="")),
         )
         # Seed the project but author no contract assertion files.
-        controller.start_project("Brief.", str(workspace))
+        controller.start_project("Brief.", str(workspace), "test-owner")
         pid = controller.store.list_projects()[0].id
 
         with pytest.raises(ToolError) as exc:
@@ -605,7 +605,7 @@ class TestEnvelopeProjectId:
             MockDispatcher(responder),
             MockTerminalReviewer(TerminalReviewHandoff(done=True, report="")),
         )
-        start = controller.start_project("Brief.", str(workspace))
+        start = controller.start_project("Brief.", str(workspace), "test-owner")
         assert start.dag is None
         pid = start.projectId
         contract_dir = controller.store.ensure_contract_dir(pid, "mission-001")

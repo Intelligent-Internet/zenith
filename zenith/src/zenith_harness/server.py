@@ -387,8 +387,12 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
                 )
                 return {
                     "recovered": True,
-                    "workspaceDir": recovered.workspace_dir,
-                    "previousProjectId": recovered.project_id,
+                    "workspaceDir": (
+                        recovered.workspace_dir if recovered is not None else workspace_dir
+                    ),
+                    "previousProjectId": (
+                        recovered.project_id if recovered is not None else None
+                    ),
                 }
             except ToolError as exc:
                 return _to_payload(exc)

@@ -19,10 +19,13 @@ import fcntl
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import socket
+import subprocess
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -129,6 +132,7 @@ class WorkspaceLease:
     last_seen_at: str
     host: str
     pid: int
+    runtime_id: str
     path: Path
 
 
@@ -160,6 +164,30 @@ def _pid_is_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _runtime_identity() -> str:
+    """Bind recovery to this machine boot and PID namespace when available."""
+    parts = [platform.system(), socket.gethostname(), str(uuid.getnode())]
+    if platform.system() == "Linux":
+        try:
+            parts.append(Path("/proc/sys/kernel/random/boot_id").read_text().strip())
+            parts.append(str(Path("/proc/self/ns/pid").stat().st_ino))
+        except OSError:
+            return ""
+    elif platform.system() == "Darwin":
+        try:
+            boot = subprocess.check_output(
+                ["/usr/sbin/sysctl", "-n", "kern.boottime"],
+                text=True,
+                timeout=2,
+            ).strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        parts.append(boot)
+    else:
+        return ""
+    return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +286,7 @@ class ProjectStore:
                     "workspace_dir": str(workspace),
                     "host": socket.gethostname(),
                     "pid": os.getpid(),
+                    "runtime_id": _runtime_identity(),
                     "claimed_at": claimed_at,
                     "last_seen_at": claimed_at,
                 }
@@ -366,6 +395,7 @@ class ProjectStore:
             "workspace_dir": str(workspace),
             "host": socket.gethostname(),
             "pid": os.getpid(),
+            "runtime_id": _runtime_identity(),
             "claimed_at": claimed_at,
             "last_seen_at": now,
         }
@@ -397,6 +427,7 @@ class ProjectStore:
             last_seen_at=now,
             host=socket.gethostname(),
             pid=os.getpid(),
+            runtime_id=_runtime_identity(),
             path=lease_path,
         )
 
@@ -448,7 +479,7 @@ class ProjectStore:
         workspace_dir: str | Path,
         requesting_owner_id: str,
         reason: str,
-    ) -> WorkspaceLease:
+    ) -> WorkspaceLease | None:
         """Release a lease only when its recorded same-host controller is dead."""
         requesting_owner_id = _normalize_owner_id(requesting_owner_id)
         reason = reason.strip()
@@ -469,13 +500,30 @@ class ProjectStore:
                 lease_path.parent / "claim.json"
             )
         if current is None:
-            raise WorkspaceLeaseConflict(
-                f"workspace lease has no provable owner identity: {lease_path}"
+            for _ in range(20):
+                time.sleep(0.05)
+                current = self._load_workspace_lease_record(lease_path)
+                if current is None:
+                    current = self._load_workspace_lease_record(
+                        lease_path.parent / "claim.json"
+                    )
+                if current is not None:
+                    break
+        if current is None:
+            self._recover_identityless_workspace_lease(
+                lease_path, requesting_owner_id, reason
             )
+            return None
         if current.host != socket.gethostname():
             raise WorkspaceLeaseConflict(
                 "cannot prove controller death on another host: "
                 f"{current.host}; lease={lease_path}"
+            )
+        runtime_id = _runtime_identity()
+        if not runtime_id or not current.runtime_id or current.runtime_id != runtime_id:
+            raise WorkspaceLeaseConflict(
+                "cannot prove controller death across a different boot or PID namespace; "
+                f"lease={lease_path}"
             )
         if _pid_is_alive(current.pid):
             raise WorkspaceLeaseConflict(
@@ -496,6 +544,7 @@ class ProjectStore:
             "previous_owner_id": current.owner_id,
             "previous_host": current.host,
             "previous_pid": current.pid,
+            "previous_runtime_id": current.runtime_id,
             "requesting_owner_id": requesting_owner_id,
             "reason": reason,
         }
@@ -520,7 +569,11 @@ class ProjectStore:
             raise WorkspaceLeaseConflict(
                 f"workspace lease changed during recovery: {lease_path}"
             )
-        if moved.host != socket.gethostname() or _pid_is_alive(moved.pid):
+        if (
+            moved.host != socket.gethostname()
+            or moved.runtime_id != runtime_id
+            or _pid_is_alive(moved.pid)
+        ):
             self._restore_quarantined_workspace_lease(quarantine, lease_path.parent)
             raise WorkspaceLeaseConflict(
                 f"workspace controller revived during recovery: {lease_path}"
@@ -530,6 +583,41 @@ class ProjectStore:
         )
         shutil.rmtree(quarantine)
         return moved
+
+    def _recover_identityless_workspace_lease(
+        self, lease_path: Path, requesting_owner_id: str, reason: str
+    ) -> None:
+        audit = {
+            "workspace_dir": str(lease_path),
+            "requesting_owner_id": requesting_owner_id,
+            "reason": reason,
+        }
+        self.append_workspace_lease_audit(
+            {"action": "identityless_recovery_authorized", **audit}
+        )
+        quarantine = lease_path.parent.with_name(
+            f"{lease_path.parent.name}.identityless.{os.getpid()}.{time.time_ns()}"
+        )
+        try:
+            os.replace(lease_path.parent, quarantine)
+        except FileNotFoundError as exc:
+            raise WorkspaceLeaseConflict(
+                f"workspace lease changed during identityless recovery: {lease_path}"
+            ) from exc
+        if self._load_workspace_lease_record(
+            quarantine / "owner.json"
+        ) is not None or self._load_workspace_lease_record(
+            quarantine / "claim.json"
+        ) is not None:
+            self._restore_quarantined_workspace_lease(quarantine, lease_path.parent)
+            raise WorkspaceLeaseConflict(
+                f"workspace identity appeared during recovery: {lease_path}"
+            )
+        self.append_workspace_lease_audit(
+            {"action": "identityless_recovery_completed", **audit}
+        )
+        shutil.rmtree(quarantine)
+        return None
 
     def _running_task_ids_for_project(self, project_id: str) -> list[str]:
         try:
@@ -615,8 +703,14 @@ class ProjectStore:
         return True
 
     @staticmethod
-    def _lease_identity(lease: WorkspaceLease) -> tuple[str, str, str, int]:
-        return (lease.owner_id, lease.project_id, lease.host, lease.pid)
+    def _lease_identity(lease: WorkspaceLease) -> tuple[str, str, str, int, str]:
+        return (
+            lease.owner_id,
+            lease.project_id,
+            lease.host,
+            lease.pid,
+            lease.runtime_id,
+        )
 
     @staticmethod
     def _restore_quarantined_workspace_lease(
@@ -684,6 +778,7 @@ class ProjectStore:
                 last_seen_at=str(payload["last_seen_at"]),
                 host=str(payload.get("host", "")),
                 pid=int(payload.get("pid", 0)),
+                runtime_id=str(payload.get("runtime_id", "")),
                 path=path,
             )
         except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -701,6 +796,7 @@ class ProjectStore:
                 last_seen_at=str(payload["last_seen_at"]),
                 host=str(payload.get("host", "")),
                 pid=int(payload.get("pid", 0)),
+                runtime_id=str(payload.get("runtime_id", "")),
                 path=path,
             )
         except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):

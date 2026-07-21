@@ -72,7 +72,7 @@ def _start_and_seed_contract(
     controller: ProjectController, workspace: Path
 ) -> str:
     """Run start_project, then seed mission-001 contract VAL-001 inside the bucket."""
-    controller.start_project("brief", str(workspace))
+    controller.start_project("brief", str(workspace), "test-owner")
     pid = controller.store.list_projects()[0].id
     contract_dir = controller.store.ensure_contract_dir(pid, "mission-001")
     (contract_dir / "VAL-001.md").write_text("# VAL-001\n\nstatement\n")
