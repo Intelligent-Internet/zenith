@@ -21,7 +21,6 @@ import os
 import re
 import shutil
 import socket
-import tempfile
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -217,9 +216,13 @@ class ProjectStore:
         lease_dir.parent.mkdir(parents=True, exist_ok=True)
         claimed_at = ""
         claimed = False
+        lease_dir_fd: int | None = None
         for _attempt in range(4):
             try:
                 lease_dir.mkdir()
+                lease_dir_fd = os.open(
+                    lease_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                )
                 claimed_at = utc_now_iso()
                 claimed = True
                 break
@@ -245,10 +248,32 @@ class ProjectStore:
                         f"requesting owner={owner_id} project={project_id}; "
                         f"lease={lease_path}"
                     )
+                lease_dir_fd = os.open(
+                    lease_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                )
+                opened = self._load_workspace_lease_record_from_dir_fd(
+                    lease_dir_fd, lease_path
+                )
+                if opened is None:
+                    os.close(lease_dir_fd)
+                    lease_dir_fd = None
+                    continue
+                if (
+                    opened.owner_id != owner_id
+                    or opened.project_id != project_id
+                ):
+                    os.close(lease_dir_fd)
+                    lease_dir_fd = None
+                    raise WorkspaceLeaseConflict(
+                        "workspace ownership changed during refresh to "
+                        f"owner={opened.owner_id} project={opened.project_id}; "
+                        f"requesting owner={owner_id} project={project_id}; "
+                        f"lease={lease_path}"
+                    )
                 claimed_at = current.claimed_at
                 claimed = True
                 break
-        if not claimed:
+        if not claimed or lease_dir_fd is None:
             raise WorkspaceLeaseConflict(
                 f"workspace lease changed repeatedly during recovery: {lease_path}"
             )
@@ -263,7 +288,25 @@ class ProjectStore:
             "claimed_at": claimed_at,
             "last_seen_at": now,
         }
-        self._write_workspace_lease_record(lease_path, payload)
+        try:
+            self._write_workspace_lease_record(lease_dir_fd, payload)
+            opened_stat = os.fstat(lease_dir_fd)
+            live_stat = lease_dir.stat()
+            if (opened_stat.st_dev, opened_stat.st_ino) != (
+                live_stat.st_dev,
+                live_stat.st_ino,
+            ):
+                raise WorkspaceLeaseConflict(
+                    f"workspace lease changed during claim: {lease_path}"
+                )
+        except WorkspaceLeaseConflict:
+            raise
+        except OSError as exc:
+            raise WorkspaceLeaseConflict(
+                f"workspace lease changed during claim: {lease_path}"
+            ) from exc
+        finally:
+            os.close(lease_dir_fd)
         return WorkspaceLease(
             owner_id=owner_id,
             project_id=project_id,
@@ -339,22 +382,54 @@ class ProjectStore:
         return True
 
     @staticmethod
-    def _write_workspace_lease_record(path: Path, payload: object) -> None:
-        """Publish one lease record without shared temp-file names."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, raw_tmp = tempfile.mkstemp(
-            prefix="owner.json.tmp.", dir=path.parent, text=True
+    def _write_workspace_lease_record(dir_fd: int, payload: object) -> None:
+        """Publish one lease record within the exact directory inode claimed."""
+        temp_name = (
+            f"owner.json.tmp.{os.getpid()}.{time.time_ns()}.{id(payload)}"
         )
-        tmp_path = Path(raw_tmp)
+        fd = os.open(
+            temp_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=dir_fd,
+        )
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=2, ensure_ascii=False)
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(tmp_path, path)
+            os.replace(
+                temp_name,
+                "owner.json",
+                src_dir_fd=dir_fd,
+                dst_dir_fd=dir_fd,
+            )
+            os.fsync(dir_fd)
         finally:
-            tmp_path.unlink(missing_ok=True)
+            try:
+                os.unlink(temp_name, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+
+    @staticmethod
+    def _load_workspace_lease_record_from_dir_fd(
+        dir_fd: int, path: Path
+    ) -> WorkspaceLease | None:
+        try:
+            fd = os.open("owner.json", os.O_RDONLY, dir_fd=dir_fd)
+            with os.fdopen(fd, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            return WorkspaceLease(
+                owner_id=str(payload["owner_id"]),
+                project_id=str(payload["project_id"]),
+                workspace_dir=str(payload["workspace_dir"]),
+                claimed_at=str(payload["claimed_at"]),
+                last_seen_at=str(payload["last_seen_at"]),
+                path=path,
+            )
+        except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
 
     @staticmethod
     def _load_workspace_lease_record(path: Path) -> WorkspaceLease | None:

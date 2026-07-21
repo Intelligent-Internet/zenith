@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -509,6 +510,46 @@ class TestWorkspaceLease:
             results = list(pool.map(claim, ["owner-a", "owner-b"]))
         assert results.count("blocked") == 1
         assert len({value for value in results if value != "blocked"}) == 1
+
+    def test_recovered_claim_cannot_be_overwritten_by_stale_publisher(
+        self,
+        store: ProjectStore,
+        workspace: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        first_ready = Event()
+        allow_first_publish = Event()
+        original_write = store._write_workspace_lease_record
+
+        def pause_first_writer(dir_fd: int, payload: object) -> None:
+            assert isinstance(payload, dict)
+            if payload["owner_id"] == "owner-a":
+                first_ready.set()
+                assert allow_first_publish.wait(timeout=5)
+            original_write(dir_fd, payload)
+
+        monkeypatch.setattr(
+            store, "_write_workspace_lease_record", pause_first_writer
+        )
+
+        def claim_first() -> str:
+            try:
+                return store.claim_workspace_lease("p1", "owner-a").owner_id
+            except WorkspaceLeaseConflict:
+                return "blocked"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(claim_first)
+            assert first_ready.wait(timeout=2)
+            second = pool.submit(
+                lambda: store.claim_workspace_lease("p1", "owner-b").owner_id
+            )
+            assert second.result(timeout=5) == "owner-b"
+            allow_first_publish.set()
+            assert first.result(timeout=5) == "blocked"
+
+        assert store.claim_workspace_lease("p1", "owner-b").owner_id == "owner-b"
 
     def test_ownerless_crashed_claim_is_fenced_and_recovered(
         self, store: ProjectStore, workspace: Path
