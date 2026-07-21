@@ -16,9 +16,12 @@ See `specs/memory_v2/PRODUCT.md` and `specs/task_list/PRODUCT.md`.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import shutil
+import socket
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -116,6 +119,20 @@ class AttemptRecord:
     path: Path
 
 
+@dataclass(frozen=True)
+class WorkspaceLease:
+    owner_id: str
+    project_id: str
+    workspace_dir: str
+    claimed_at: str
+    last_seen_at: str
+    path: Path
+
+
+class WorkspaceLeaseConflict(RuntimeError):
+    """A different controller already owns the writable workspace."""
+
+
 # ---------------------------------------------------------------------------
 # ProjectStore
 # ---------------------------------------------------------------------------
@@ -156,6 +173,137 @@ class ProjectStore:
         """Cursor per-mission dir (tasks.json, task-state.json, contract-state.json,
         attempts/*.json)."""
         return self.zenith_runtime_dir(project_id) / "missions" / mission_id
+
+    def workspace_lease_path(self, project_id: str) -> Path:
+        workspace = self.workspace_dir(project_id).expanduser().resolve()
+        return self._workspace_lease_path(workspace)
+
+    def _workspace_lease_path(self, workspace: str | Path) -> Path:
+        workspace = Path(workspace).expanduser().resolve()
+        key = hashlib.sha256(str(workspace).encode("utf-8")).hexdigest()[:24]
+        return self.config.harness_home / "leases" / "workspaces" / f"{key}.lease" / "owner.json"
+
+    def claim_workspace_lease(
+        self, project_id: str, owner_id: str
+    ) -> WorkspaceLease:
+        return self.claim_workspace_lease_for_workspace(
+            self.workspace_dir(project_id), project_id, owner_id
+        )
+
+    def claim_workspace_lease_for_workspace(
+        self,
+        workspace_dir: str | Path,
+        project_id: str,
+        owner_id: str,
+    ) -> WorkspaceLease:
+        """Claim persistent write ownership for a project's exact workspace.
+
+        The directory creation is the atomic compare-and-set. Ownership persists
+        across MCP calls and processes until the owning controller explicitly
+        releases it. Different workspaces remain independently claimable.
+        """
+        if not owner_id.strip():
+            raise ValueError("owner_id is empty")
+        workspace = Path(workspace_dir).expanduser().resolve()
+        lease_path = self._workspace_lease_path(workspace)
+        lease_dir = lease_path.parent
+        lease_dir.parent.mkdir(parents=True, exist_ok=True)
+        created = False
+        try:
+            lease_dir.mkdir()
+            created = True
+        except FileExistsError:
+            pass
+
+        if not created:
+            current = self._load_workspace_lease_record(lease_path)
+            if current is None:
+                for _ in range(5):
+                    time.sleep(0.05)
+                    current = self._load_workspace_lease_record(lease_path)
+                    if current is not None:
+                        break
+            if current is None:
+                raise WorkspaceLeaseConflict(
+                    f"workspace lease is incomplete: {lease_path}"
+                )
+            if (
+                current.owner_id != owner_id
+                or current.project_id != project_id
+            ):
+                raise WorkspaceLeaseConflict(
+                    "workspace already owned by "
+                    f"owner={current.owner_id} project={current.project_id}; "
+                    f"requesting owner={owner_id} project={project_id}; "
+                    f"lease={lease_path}"
+                )
+            claimed_at = current.claimed_at
+        else:
+            claimed_at = utc_now_iso()
+
+        now = utc_now_iso()
+        payload = {
+            "schema_version": 1,
+            "owner_id": owner_id,
+            "project_id": project_id,
+            "workspace_dir": str(workspace),
+            "host": socket.gethostname(),
+            "claimed_at": claimed_at,
+            "last_seen_at": now,
+        }
+        atomic_write_json(lease_path, payload)
+        return WorkspaceLease(
+            owner_id=owner_id,
+            project_id=project_id,
+            workspace_dir=str(workspace),
+            claimed_at=claimed_at,
+            last_seen_at=now,
+            path=lease_path,
+        )
+
+    def release_workspace_lease(self, project_id: str, owner_id: str) -> None:
+        self.release_workspace_lease_for_workspace(
+            self.workspace_dir(project_id), project_id, owner_id
+        )
+
+    def release_workspace_lease_for_workspace(
+        self,
+        workspace_dir: str | Path,
+        project_id: str,
+        owner_id: str,
+    ) -> None:
+        lease_path = self._workspace_lease_path(workspace_dir)
+        if not lease_path.parent.exists():
+            return
+        current = self._load_workspace_lease_record(lease_path)
+        if current is None:
+            raise WorkspaceLeaseConflict(
+                f"workspace lease is incomplete: {lease_path}"
+            )
+        if current.owner_id != owner_id or current.project_id != project_id:
+            raise WorkspaceLeaseConflict(
+                "workspace already owned by "
+                f"owner={current.owner_id} project={current.project_id}; "
+                f"requesting release owner={owner_id} project={project_id}; "
+                f"lease={lease_path}"
+            )
+        lease_path.unlink()
+        lease_path.parent.rmdir()
+
+    @staticmethod
+    def _load_workspace_lease_record(path: Path) -> WorkspaceLease | None:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return WorkspaceLease(
+                owner_id=str(payload["owner_id"]),
+                project_id=str(payload["project_id"]),
+                workspace_dir=str(payload["workspace_dir"]),
+                claimed_at=str(payload["claimed_at"]),
+                last_seen_at=str(payload["last_seen_at"]),
+                path=path,
+            )
+        except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
 
     # ------------------------------------------------------------------
     # Project lifecycle

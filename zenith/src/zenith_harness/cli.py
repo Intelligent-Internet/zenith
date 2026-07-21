@@ -250,9 +250,17 @@ def inspect_tasks_cmd(project_id: str, mission_id: str | None) -> None:
 @cli.command("abort-project")
 @click.argument("project_id")
 @click.option("--reason", required=True)
-def abort_project_cmd(project_id: str, reason: str) -> None:
+@click.option(
+    "--owner-id",
+    default=None,
+    help=(
+        "Stable controller/session id. Defaults to ZENITH_CONTROLLER_ID, "
+        "CODEX_THREAD_ID, or a Claude session id."
+    ),
+)
+def abort_project_cmd(project_id: str, reason: str, owner_id: str | None) -> None:
     """Mark a project Aborted (CLI-side: preserves tasks.json + attempts/)."""
-    from .controller import ProjectController
+    from .controller import ProjectController, ToolError
     from .dispatcher import MockDispatcher, MockTerminalReviewer
     from .models import TerminalReviewHandoff, WorkHandoff
 
@@ -262,7 +270,29 @@ def abort_project_cmd(project_id: str, reason: str) -> None:
         MockDispatcher(lambda r: WorkHandoff(node_id=r.task.id, done=False, report="aborted")),
         MockTerminalReviewer(TerminalReviewHandoff(done=True, report="")),
     )
-    env = controller.abort_project(project_id, reason)
+    resolved_owner = owner_id or next(
+        (
+            os.environ[name]
+            for name in (
+                "ZENITH_CONTROLLER_ID",
+                "CODEX_THREAD_ID",
+                "CLAUDE_CODE_SESSION_ID",
+                "CLAUDE_SESSION_ID",
+            )
+            if os.environ.get(name)
+        ),
+        None,
+    )
+    if resolved_owner is None:
+        raise click.ClickException(
+            "abort-project requires --owner-id or ZENITH_CONTROLLER_ID "
+            "(CODEX_THREAD_ID and Claude session ids are also accepted)"
+        )
+    try:
+        controller.claim_project(project_id, resolved_owner)
+        env = controller.abort_project(project_id, reason)
+    except ToolError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Aborted {project_id}: state={env.state.state}")
 
 

@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import logging
 import os
+from uuid import uuid4
 from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
@@ -39,7 +40,7 @@ def create_orchestrator_server(
     config: HarnessConfig,
     controller: ProjectController | None = None,
 ) -> FastMCP:
-    """7 orchestrator tools, registered on a stdio MCP server."""
+    """8 orchestrator tools, registered on a stdio MCP server."""
     if controller is None:
         from .dispatcher import MockDispatcher, MockTerminalReviewer
 
@@ -55,8 +56,9 @@ def create_orchestrator_server(
         name="zenith",
         instructions=(
             "Mission orchestration harness. Mode: orchestrator. "
-            "7 tools: start_project, submit_plan, advance_project, "
+            "8 tools: start_project, submit_plan, advance_project, "
             "end_mission, decide_attention, inspect_project, abort_project. "
+            "release_project performs an explicit controller handoff. "
             "Lifecycle: plan with submit_plan, run with advance_project, "
             "request closure with end_mission, resolve attention with decide_attention, "
             "then call advance_project again."
@@ -100,15 +102,29 @@ def create_terminal_reviewer_server() -> FastMCP:
 
 
 def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) -> None:
-    # Per-project lock around mutating controller calls. The thread hop in each
-    # tool prevents event-loop blocking, but two same-project tool calls could
-    # otherwise race on disk state (attention, attempts, task-state, tasks).
-    # docs/v5/07-runtime-architecture.md §9 declares concurrent same-project
-    # operations undefined behavior; this lock serializes them defensively
-    # without requiring host coordination. `inspect_project` is read-only and
-    # stays uncontended.
+    # The in-process lock serializes overlapping calls in this server. The
+    # persistent workspace lease below it prevents a second server process or
+    # root orchestrator from mutating the same workspace. `inspect_project` is
+    # read-only and stays uncontended so recovery audits remain possible.
     project_locks: dict[str, asyncio.Lock] = {}
     locks_guard = asyncio.Lock()
+    server_instance_owner = f"server:{uuid4()}"
+    explicit_owner = (
+        os.environ.get("ZENITH_CONTROLLER_ID")
+        or os.environ.get("CODEX_THREAD_ID")
+        or os.environ.get("CLAUDE_CODE_SESSION_ID")
+        or os.environ.get("CLAUDE_SESSION_ID")
+    )
+
+    def _controller_owner(ctx: Context | None) -> str:
+        if explicit_owner:
+            return explicit_owner
+        if ctx is not None and ctx.request_context is not None:
+            return ctx.session_id
+        return server_instance_owner
+
+    def _claim(project_id: str, owner_id: str) -> None:
+        controller.claim_project(project_id, owner_id)
 
     async def _project_lock(project_id: str) -> asyncio.Lock:
         async with locks_guard:
@@ -132,11 +148,17 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
         workspace_dir: Annotated[
             str, Field(description="Absolute path to the user's workspace.")
         ],
+        ctx: Context | None = None,
     ) -> dict[str, Any]:
         # No per-project lock: project_id does not exist until the call returns.
         try:
             return _to_payload(
-                await asyncio.to_thread(controller.start_project, brief, workspace_dir)
+                await asyncio.to_thread(
+                    controller.start_project,
+                    brief,
+                    workspace_dir,
+                    _controller_owner(ctx),
+                )
             )
         except ToolError as exc:
             return _to_payload(exc)
@@ -162,9 +184,12 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
                 )
             ),
         ],
+        ctx: Context | None = None,
     ) -> dict[str, Any]:
         async with await _project_lock(project_id):
             try:
+                owner_id = _controller_owner(ctx)
+                await asyncio.to_thread(_claim, project_id, owner_id)
                 return _to_payload(
                     await asyncio.to_thread(controller.submit_plan, project_id, task_list)
                 )
@@ -192,6 +217,8 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
     ) -> dict[str, Any]:
         async with await _project_lock(project_id):
             try:
+                owner_id = _controller_owner(ctx)
+                await asyncio.to_thread(_claim, project_id, owner_id)
                 return _to_payload(
                     await asyncio.to_thread(controller.advance_project, project_id, max_steps)
                 )
@@ -211,9 +238,12 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
     )
     async def end_mission(
         project_id: Annotated[str, Field(description="Project id.")],
+        ctx: Context | None = None,
     ) -> dict[str, Any]:
         async with await _project_lock(project_id):
             try:
+                owner_id = _controller_owner(ctx)
+                await asyncio.to_thread(_claim, project_id, owner_id)
                 return _to_payload(
                     await asyncio.to_thread(controller.end_mission, project_id)
                 )
@@ -236,9 +266,12 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
         decisions: Annotated[
             list[Decision], Field(description="One Decision per open attention item.")
         ],
+        ctx: Context | None = None,
     ) -> dict[str, Any]:
         async with await _project_lock(project_id):
             try:
+                owner_id = _controller_owner(ctx)
+                await asyncio.to_thread(_claim, project_id, owner_id)
                 return _to_payload(
                     await asyncio.to_thread(controller.decide_attention, project_id, decisions)
                 )
@@ -272,12 +305,41 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
     async def abort_project(
         project_id: Annotated[str, Field(description="Project id.")],
         reason: Annotated[str, Field(description="Why we are aborting.")],
+        ctx: Context | None = None,
     ) -> dict[str, Any]:
         async with await _project_lock(project_id):
             try:
+                owner_id = _controller_owner(ctx)
+                await asyncio.to_thread(_claim, project_id, owner_id)
                 return _to_payload(
                     await asyncio.to_thread(controller.abort_project, project_id, reason)
                 )
+            except ToolError as exc:
+                return _to_payload(exc)
+
+    @mcp.tool(
+        name="release_project",
+        description=(
+            "Release this controller's persistent workspace lease for an explicit "
+            "handoff to another root orchestrator. Do not call while a mutating "
+            "tool is running. Read-only inspection never requires ownership."
+        ),
+    )
+    async def release_project(
+        project_id: Annotated[str, Field(description="Project id.")],
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        async with await _project_lock(project_id):
+            try:
+                owner_id = _controller_owner(ctx)
+                await asyncio.to_thread(
+                    controller.release_project, project_id, owner_id
+                )
+                return {
+                    "released": True,
+                    "projectId": project_id,
+                    "ownerId": owner_id,
+                }
             except ToolError as exc:
                 return _to_payload(exc)
 

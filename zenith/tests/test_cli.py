@@ -9,6 +9,10 @@ import pytest
 from click.testing import CliRunner
 
 from zenith_harness.cli import cli
+from zenith_harness.config import HarnessConfig
+from zenith_harness.controller import ProjectController
+from zenith_harness.dispatcher import MockDispatcher, MockTerminalReviewer
+from zenith_harness.models import TerminalReviewHandoff, WorkHandoff
 
 
 @pytest.fixture
@@ -33,6 +37,86 @@ def _expected_mcp_server_args() -> list[str]:
         "--mode",
         "orchestrator",
     ]
+
+
+def _create_owned_project(workspace: Path, owner_id: str) -> str:
+    config = HarnessConfig.discover()
+    controller = ProjectController(
+        config,
+        MockDispatcher(
+            lambda request: WorkHandoff(
+                node_id=request.task.id, done=False, report="unused"
+            )
+        ),
+        MockTerminalReviewer(TerminalReviewHandoff(done=True, report="")),
+    )
+    envelope = controller.start_project("Owned.", str(workspace), owner_id)
+    return envelope.projectId
+
+
+class TestAbortProjectOwnership:
+    def test_requires_stable_controller_identity(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        for name in (
+            "ZENITH_CONTROLLER_ID",
+            "CODEX_THREAD_ID",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_SESSION_ID",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        project_id = _create_owned_project(workspace, "owner-a")
+
+        result = runner.invoke(
+            cli, ["abort-project", project_id, "--reason", "no owner"]
+        )
+
+        assert result.exit_code != 0
+        assert "--owner-id or ZENITH_CONTROLLER_ID" in result.output
+
+    def test_non_owner_cannot_abort(
+        self, runner: CliRunner, workspace: Path, env: dict[str, str]
+    ) -> None:
+        project_id = _create_owned_project(workspace, "owner-a")
+
+        result = runner.invoke(
+            cli,
+            [
+                "abort-project",
+                project_id,
+                "--reason",
+                "wrong owner",
+                "--owner-id",
+                "owner-b",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "workspace_owned" in result.output
+
+    def test_owner_can_abort(
+        self, runner: CliRunner, workspace: Path, env: dict[str, str]
+    ) -> None:
+        project_id = _create_owned_project(workspace, "owner-a")
+
+        result = runner.invoke(
+            cli,
+            [
+                "abort-project",
+                project_id,
+                "--reason",
+                "intentional",
+                "--owner-id",
+                "owner-a",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert f"Aborted {project_id}" in result.output
 
 
 class TestInit:

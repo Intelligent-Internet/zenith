@@ -25,6 +25,7 @@ Drive the mission only through the orchestrator runtime tools:
 - Quiescent `mission_running`: when no runnable work remains and evidence supports closure, call `end_mission`.
 - `attention_needed`: read every open item and its evidence, decide exactly once per item with `decide_attention`, then call `advance_project`.
 - User-requested or justified mission cancellation: call `abort_project(project_id, reason)`.
+- Intentional handoff to another root orchestrator: stop all mutation, then call `release_project(project_id)`. Never share one writable workspace between root orchestrators.
 - `done`, `failed`, `aborted`: terminal states. Do not continue mission work unless the user starts a new scope or explicitly asks for forensic inspection.
 
 `submit_plan` and `decide_attention` persist state; they do not dispatch work. `advance_project` dispatches workers, validators, merge work, and gate evaluation according to runtime state. `end_mission` requests runtime closure and terminal review; call it only after planning, validation, gates, evidence review, and open attention handling support closure.
@@ -361,8 +362,9 @@ Orchestrator tools:
 - `decide_attention(project_id, decisions)`: resolve every open attention item with exactly one decision, then return to runtime flow. Call `advance_project` afterward.
 - `end_mission(project_id)`: request runtime closure and terminal review only after work is quiescent and evidence supports closure.
 - `abort_project(project_id, reason)`: terminal cancellation with a recorded reason.
+- `release_project(project_id)`: explicitly release persistent workspace ownership so another root orchestrator can take over. Read-only inspection by other sessions remains available before release.
 
-Every orchestrator tool returns an envelope with `projectId`, `state`, `projectRoot`, `harnessRoot`, and `dag`. Some lifecycle/decision tools intentionally return `dag=null`; `submit_plan` and `advance_project` return a compact frontier view; `inspect_project` returns the full task-list view. Trust the envelope, runtime files, and returned paths over session memory.
+Lifecycle and inspection tools return an envelope with `projectId`, `state`, `projectRoot`, `harnessRoot`, and `dag`. Some lifecycle/decision tools intentionally return `dag=null`; `submit_plan` and `advance_project` return a compact frontier view; `inspect_project` returns the full task-list view. `release_project` returns a release acknowledgement. Trust the envelope, runtime files, and returned paths over session memory.
 
 `submit_plan` accepts a `TaskList`:
 

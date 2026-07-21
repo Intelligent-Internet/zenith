@@ -1,6 +1,8 @@
 """Storage layer tests. See specs/memory_v2/PRODUCT.md for layout."""
 from __future__ import annotations
 
+import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -17,7 +19,12 @@ from zenith_harness.models import (
     ValidationItem,
     WorkHandoff,
 )
-from zenith_harness.storage import ProjectStore, slugify, utc_now_filesafe
+from zenith_harness.storage import (
+    ProjectStore,
+    WorkspaceLeaseConflict,
+    slugify,
+    utc_now_filesafe,
+)
 
 
 @pytest.fixture
@@ -418,3 +425,87 @@ class TestSeal:
         text = path.read_text()
         assert "status: done" in text and "Everything shipped." in text
         assert path == store.mission_dir("p1", "mission-001") / "closeout.md"
+
+
+class TestWorkspaceLease:
+    def test_same_owner_can_reenter(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        first = store.claim_workspace_lease("p1", "owner-a")
+        second = store.claim_workspace_lease("p1", "owner-a")
+        assert second.owner_id == first.owner_id
+        assert second.claimed_at == first.claimed_at
+
+    def test_different_owner_is_blocked(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        store.claim_workspace_lease("p1", "owner-a")
+        with pytest.raises(WorkspaceLeaseConflict, match="owner-a"):
+            store.claim_workspace_lease("p1", "owner-b")
+
+    def test_same_owner_cannot_claim_second_project_for_workspace(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        store.create_project("one", workspace, project_id="p1")
+        store.create_project("two", workspace, project_id="p2")
+        store.claim_workspace_lease("p1", "owner-a")
+        with pytest.raises(WorkspaceLeaseConflict, match="p1"):
+            store.claim_workspace_lease("p2", "owner-a")
+
+    def test_different_workspaces_allow_parallel_owners(
+        self, store: ProjectStore, tmp_path: Path
+    ) -> None:
+        one = tmp_path / "one"
+        two = tmp_path / "two"
+        one.mkdir()
+        two.mkdir()
+        store.create_project("one", one, project_id="p1")
+        store.create_project("two", two, project_id="p2")
+        assert store.claim_workspace_lease("p1", "owner-a").owner_id == "owner-a"
+        assert store.claim_workspace_lease("p2", "owner-b").owner_id == "owner-b"
+
+    def test_non_owner_cannot_release(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        store.claim_workspace_lease("p1", "owner-a")
+        with pytest.raises(WorkspaceLeaseConflict, match="owner-a"):
+            store.release_workspace_lease("p1", "owner-b")
+
+    def test_release_allows_explicit_handoff(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        store.claim_workspace_lease("p1", "owner-a")
+        store.release_workspace_lease("p1", "owner-a")
+        assert store.claim_workspace_lease("p1", "owner-b").owner_id == "owner-b"
+
+    def test_record_contains_forensic_identity(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        lease = store.claim_workspace_lease("p1", "owner-a")
+        payload = json.loads(lease.path.read_text(encoding="utf-8"))
+        assert payload["owner_id"] == "owner-a"
+        assert payload["project_id"] == "p1"
+        assert payload["workspace_dir"] == str(workspace.resolve())
+        assert payload["claimed_at"]
+        assert payload["last_seen_at"]
+
+    def test_atomic_claim_has_exactly_one_winner(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+
+        def claim(owner: str) -> str:
+            try:
+                return store.claim_workspace_lease("p1", owner).owner_id
+            except WorkspaceLeaseConflict:
+                return "blocked"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(claim, ["owner-a", "owner-b"]))
+        assert results.count("blocked") == 1
+        assert len({value for value in results if value != "blocked"}) == 1

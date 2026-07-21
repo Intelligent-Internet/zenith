@@ -1,4 +1,4 @@
-"""ProjectController — routes the 7 orchestrator MCP tools.
+"""ProjectController -- routes the 8 orchestrator MCP tools.
 
 See `specs/task_list/PRODUCT.md`. The controller owns:
 - envelope construction
@@ -31,7 +31,7 @@ from .models import (
     TaskListPatch,
     TaskStateFile,
 )
-from .storage import ProjectStore
+from .storage import ProjectStore, WorkspaceLeaseConflict
 from .task_list_patch import apply_patch
 from .task_validation import (
     ValidationError,
@@ -71,10 +71,29 @@ class ProjectController:
     # Tool methods
     # ------------------------------------------------------------------
 
-    def start_project(self, brief: str, workspace_dir: str) -> Envelope:
+    def start_project(
+        self, brief: str, workspace_dir: str, owner_id: str | None = None
+    ) -> Envelope:
         if not brief.strip():
             raise ToolError("invalid_brief", "brief is empty")
-        record = self.store.create_project(brief, workspace_dir)
+        project_id = self.store.generate_project_id(brief)
+        if owner_id is not None:
+            try:
+                self.store.claim_workspace_lease_for_workspace(
+                    workspace_dir, project_id, owner_id
+                )
+            except WorkspaceLeaseConflict as exc:
+                raise ToolError("workspace_owned", str(exc)) from exc
+        try:
+            record = self.store.create_project(
+                brief, workspace_dir, project_id=project_id
+            )
+        except Exception:
+            if owner_id is not None:
+                self.store.release_workspace_lease_for_workspace(
+                    workspace_dir, project_id, owner_id
+                )
+            raise
         mission_id = self.store.generate_mission_id(1)
         record.current_mission_id = mission_id
         self.store.save_project(record)
@@ -82,6 +101,34 @@ class ProjectController:
             record.id, MissionPlanning(mission_id=mission_id)
         )
         return self._build_envelope(record.id, dag_mode="none")
+
+    def claim_project(self, project_id: str, owner_id: str) -> None:
+        try:
+            self.store.claim_workspace_lease(project_id, owner_id)
+        except WorkspaceLeaseConflict as exc:
+            raise ToolError("workspace_owned", str(exc)) from exc
+
+    def release_project(self, project_id: str, owner_id: str) -> None:
+        record = self.store.load_project(project_id)
+        state = self.store.load_state(project_id)
+        mission_id = self._current_mission_id(record, state)
+        if mission_id is not None:
+            task_state = self.store.load_task_state(project_id, mission_id)
+            running = sorted(
+                task_id
+                for task_id, entry in task_state.tasks.items()
+                if entry.status == "running"
+            )
+            if running:
+                raise ToolError(
+                    "workspace_busy",
+                    "cannot release controller ownership while tasks are running: "
+                    + ", ".join(running),
+                )
+        try:
+            self.store.release_workspace_lease(project_id, owner_id)
+        except WorkspaceLeaseConflict as exc:
+            raise ToolError("workspace_owned", str(exc)) from exc
 
     def submit_plan(self, project_id: str, task_list: TaskList) -> Envelope:
         state = self._require_state(project_id)

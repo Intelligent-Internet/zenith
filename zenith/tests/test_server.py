@@ -67,6 +67,7 @@ async def test_orchestrator_tools_registered(config: HarnessConfig) -> None:
         "decide_attention",
         "inspect_project",
         "abort_project",
+        "release_project",
     }
 
 
@@ -224,6 +225,141 @@ async def test_orchestrator_end_to_end_in_process(
     )
     await server.call_tool("advance_project", {"project_id": pid})
     await server.call_tool("inspect_project", {"project_id": pid})
+
+
+@pytest.mark.asyncio
+async def test_second_server_cannot_mutate_owned_workspace(
+    config: HarnessConfig, workspace: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ZENITH_CONTROLLER_ID", "owner-a")
+    first = create_orchestrator_server(config)
+    monkeypatch.setenv("ZENITH_CONTROLLER_ID", "owner-b")
+    second = create_orchestrator_server(config)
+    started = await first.call_tool(
+        "start_project", {"brief": "Owned.", "workspace_dir": str(workspace)}
+    )
+    pid = started.structured_content["projectId"]
+
+    blocked = await second.call_tool(
+        "abort_project", {"project_id": pid, "reason": "should not mutate"}
+    )
+    assert blocked.structured_content["error"] == "workspace_owned"
+    assert "owner=" in blocked.structured_content["message"]
+
+
+@pytest.mark.asyncio
+async def test_second_server_can_inspect_owned_workspace(
+    config: HarnessConfig, workspace: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ZENITH_CONTROLLER_ID", "owner-a")
+    first = create_orchestrator_server(config)
+    monkeypatch.setenv("ZENITH_CONTROLLER_ID", "owner-b")
+    second = create_orchestrator_server(config)
+    started = await first.call_tool(
+        "start_project", {"brief": "Owned.", "workspace_dir": str(workspace)}
+    )
+    pid = started.structured_content["projectId"]
+
+    inspected = await second.call_tool("inspect_project", {"project_id": pid})
+    assert inspected.structured_content["projectId"] == pid
+    assert "error" not in inspected.structured_content
+
+
+@pytest.mark.asyncio
+async def test_explicit_release_allows_controller_handoff(
+    config: HarnessConfig, workspace: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ZENITH_CONTROLLER_ID", "owner-a")
+    first = create_orchestrator_server(config)
+    monkeypatch.setenv("ZENITH_CONTROLLER_ID", "owner-b")
+    second = create_orchestrator_server(config)
+    started = await first.call_tool(
+        "start_project", {"brief": "Owned.", "workspace_dir": str(workspace)}
+    )
+    pid = started.structured_content["projectId"]
+
+    released = await first.call_tool("release_project", {"project_id": pid})
+    assert released.structured_content["released"] is True
+    taken_over = await second.call_tool(
+        "abort_project", {"project_id": pid, "reason": "intentional handoff"}
+    )
+    assert taken_over.structured_content["state"]["state"] == "aborted"
+
+
+@pytest.mark.asyncio
+async def test_non_owner_cannot_release_project(
+    config: HarnessConfig, workspace: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ZENITH_CONTROLLER_ID", "owner-a")
+    first = create_orchestrator_server(config)
+    monkeypatch.setenv("ZENITH_CONTROLLER_ID", "owner-b")
+    second = create_orchestrator_server(config)
+    started = await first.call_tool(
+        "start_project", {"brief": "Owned.", "workspace_dir": str(workspace)}
+    )
+    pid = started.structured_content["projectId"]
+
+    blocked = await second.call_tool("release_project", {"project_id": pid})
+    assert blocked.structured_content["error"] == "workspace_owned"
+
+
+@pytest.mark.asyncio
+async def test_owner_cannot_release_project_while_task_is_running(
+    config: HarnessConfig, workspace: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ZENITH_CONTROLLER_ID", "owner-a")
+    server = create_orchestrator_server(config)
+    started = await server.call_tool(
+        "start_project", {"brief": "Owned.", "workspace_dir": str(workspace)}
+    )
+    pid = started.structured_content["projectId"]
+    store = ProjectStore(config)
+    contract_dir = store.ensure_contract_dir(pid, "mission-001")
+    (contract_dir / "VAL-001.md").write_text("# VAL-001\n")
+    await server.call_tool(
+        "submit_plan",
+        {
+            "project_id": pid,
+            "task_list": {
+                "tasks": [
+                    {
+                        "id": "w1",
+                        "type": "work",
+                        "body": "do",
+                        "targets": ["VAL-001"],
+                        "skill": "s",
+                        "depends_on": [],
+                    }
+                ]
+            },
+        },
+    )
+    task_state = store.load_task_state(pid, "mission-001")
+    task_state.set_status("w1", "running")
+    store.save_task_state(pid, "mission-001", task_state)
+
+    blocked = await server.call_tool("release_project", {"project_id": pid})
+    assert blocked.structured_content["error"] == "workspace_busy"
+    assert "w1" in blocked.structured_content["message"]
+
+
+@pytest.mark.asyncio
+async def test_second_server_cannot_start_another_project_in_owned_workspace(
+    config: HarnessConfig, workspace: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ZENITH_CONTROLLER_ID", "owner-a")
+    first = create_orchestrator_server(config)
+    monkeypatch.setenv("ZENITH_CONTROLLER_ID", "owner-b")
+    second = create_orchestrator_server(config)
+    await first.call_tool(
+        "start_project", {"brief": "First.", "workspace_dir": str(workspace)}
+    )
+
+    blocked = await second.call_tool(
+        "start_project", {"brief": "Second.", "workspace_dir": str(workspace)}
+    )
+    assert blocked.structured_content["error"] == "workspace_owned"
+    assert len(ProjectStore(config).list_projects()) == 1
 
 
 # ---------------------------------------------------------------------------
