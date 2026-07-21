@@ -132,6 +132,7 @@ class WorkspaceLease:
     last_seen_at: str
     host: str
     pid: int
+    process_start_id: str
     runtime_id: str
     path: Path
 
@@ -164,6 +165,41 @@ def _pid_is_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _process_start_id(pid: int) -> str:
+    """Return a boot-local process birth identity, or empty when unprovable."""
+    if pid <= 0:
+        return ""
+    system = platform.system()
+    if system == "Linux":
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+            after_comm = stat.rsplit(")", 1)[1].strip().split()
+            return f"linux:{after_comm[19]}"
+        except (OSError, IndexError):
+            return ""
+    if system == "Darwin":
+        try:
+            started = subprocess.check_output(
+                ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+                text=True,
+                timeout=2,
+            ).strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return f"darwin:{started}" if started else ""
+    return ""
+
+
+def _process_identity_is_live(pid: int, expected_start_id: str) -> bool:
+    """Treat an unprovable identity as live; only a proven mismatch is stale."""
+    if not _pid_is_alive(pid):
+        return False
+    actual_start_id = _process_start_id(pid)
+    if not actual_start_id or not expected_start_id:
+        return True
+    return actual_start_id == expected_start_id
 
 
 def _runtime_identity() -> str:
@@ -266,6 +302,13 @@ class ProjectStore:
         workspace = requested_workspace.resolve()
         if not workspace.is_dir():
             raise FileNotFoundError(f"workspace_dir does not exist: {workspace}")
+        runtime_id = _runtime_identity()
+        process_start_id = _process_start_id(os.getpid())
+        if not runtime_id or not process_start_id:
+            raise WorkspaceLeaseConflict(
+                "cannot claim workspace without a provable runtime identity and "
+                "process start identity"
+            )
         lease_path = self._workspace_lease_path(workspace)
         lease_dir = lease_path.parent
         lease_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -280,13 +323,14 @@ class ProjectStore:
                 )
                 claimed_at = utc_now_iso()
                 claim_payload = {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "owner_id": owner_id,
                     "project_id": project_id,
                     "workspace_dir": str(workspace),
                     "host": socket.gethostname(),
                     "pid": os.getpid(),
-                    "runtime_id": _runtime_identity(),
+                    "process_start_id": process_start_id,
+                    "runtime_id": runtime_id,
                     "claimed_at": claimed_at,
                     "last_seen_at": claimed_at,
                 }
@@ -321,7 +365,9 @@ class ProjectStore:
                             "workspace lease has an incomplete claim on another "
                             f"host ({incomplete_marker.host}): {lease_path}"
                         )
-                    if _pid_is_alive(incomplete_marker.pid):
+                    if _process_identity_is_live(
+                        incomplete_marker.pid, incomplete_marker.process_start_id
+                    ):
                         raise WorkspaceLeaseConflict(
                             "workspace has incomplete active claim by "
                             f"owner={incomplete_marker.owner_id} "
@@ -347,8 +393,13 @@ class ProjectStore:
                         "same owner id is active on another host "
                         f"({current.host}); lease={lease_path}"
                     )
-                if current.pid != os.getpid():
-                    if _pid_is_alive(current.pid):
+                if (
+                    current.pid != os.getpid()
+                    or current.process_start_id != process_start_id
+                ):
+                    if _process_identity_is_live(
+                        current.pid, current.process_start_id
+                    ):
                         raise WorkspaceLeaseConflict(
                             "same owner id is active in another controller process "
                             f"pid={current.pid}; lease={lease_path}"
@@ -389,13 +440,14 @@ class ProjectStore:
 
         now = utc_now_iso()
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "owner_id": owner_id,
             "project_id": project_id,
             "workspace_dir": str(workspace),
             "host": socket.gethostname(),
             "pid": os.getpid(),
-            "runtime_id": _runtime_identity(),
+            "process_start_id": process_start_id,
+            "runtime_id": runtime_id,
             "claimed_at": claimed_at,
             "last_seen_at": now,
         }
@@ -427,7 +479,8 @@ class ProjectStore:
             last_seen_at=now,
             host=socket.gethostname(),
             pid=os.getpid(),
-            runtime_id=_runtime_identity(),
+            process_start_id=process_start_id,
+            runtime_id=runtime_id,
             path=lease_path,
         )
 
@@ -458,7 +511,11 @@ class ProjectStore:
                 f"requesting release owner={owner_id} project={project_id}; "
                 f"lease={lease_path}"
             )
-        if current.host != socket.gethostname() or current.pid != os.getpid():
+        if (
+            current.host != socket.gethostname()
+            or current.pid != os.getpid()
+            or current.process_start_id != _process_start_id(os.getpid())
+        ):
             raise WorkspaceLeaseConflict(
                 "workspace release requires the exact live controller process; "
                 f"lease={lease_path}"
@@ -510,10 +567,10 @@ class ProjectStore:
                 if current is not None:
                     break
         if current is None:
-            self._recover_identityless_workspace_lease(
-                lease_path, requesting_owner_id, reason
+            raise WorkspaceLeaseConflict(
+                "workspace lease has no recoverable claim identity; manual "
+                f"forensic intervention is required; lease={lease_path}"
             )
-            return None
         if current.host != socket.gethostname():
             raise WorkspaceLeaseConflict(
                 "cannot prove controller death on another host: "
@@ -525,7 +582,7 @@ class ProjectStore:
                 "cannot prove controller death across a different boot or PID namespace; "
                 f"lease={lease_path}"
             )
-        if _pid_is_alive(current.pid):
+        if _process_identity_is_live(current.pid, current.process_start_id):
             raise WorkspaceLeaseConflict(
                 "cannot recover live workspace controller "
                 f"pid={current.pid}; lease={lease_path}"
@@ -544,6 +601,7 @@ class ProjectStore:
             "previous_owner_id": current.owner_id,
             "previous_host": current.host,
             "previous_pid": current.pid,
+            "previous_process_start_id": current.process_start_id,
             "previous_runtime_id": current.runtime_id,
             "requesting_owner_id": requesting_owner_id,
             "reason": reason,
@@ -572,7 +630,7 @@ class ProjectStore:
         if (
             moved.host != socket.gethostname()
             or moved.runtime_id != runtime_id
-            or _pid_is_alive(moved.pid)
+            or _process_identity_is_live(moved.pid, moved.process_start_id)
         ):
             self._restore_quarantined_workspace_lease(quarantine, lease_path.parent)
             raise WorkspaceLeaseConflict(
@@ -583,41 +641,6 @@ class ProjectStore:
         )
         shutil.rmtree(quarantine)
         return moved
-
-    def _recover_identityless_workspace_lease(
-        self, lease_path: Path, requesting_owner_id: str, reason: str
-    ) -> None:
-        audit = {
-            "workspace_dir": str(lease_path),
-            "requesting_owner_id": requesting_owner_id,
-            "reason": reason,
-        }
-        self.append_workspace_lease_audit(
-            {"action": "identityless_recovery_authorized", **audit}
-        )
-        quarantine = lease_path.parent.with_name(
-            f"{lease_path.parent.name}.identityless.{os.getpid()}.{time.time_ns()}"
-        )
-        try:
-            os.replace(lease_path.parent, quarantine)
-        except FileNotFoundError as exc:
-            raise WorkspaceLeaseConflict(
-                f"workspace lease changed during identityless recovery: {lease_path}"
-            ) from exc
-        if self._load_workspace_lease_record(
-            quarantine / "owner.json"
-        ) is not None or self._load_workspace_lease_record(
-            quarantine / "claim.json"
-        ) is not None:
-            self._restore_quarantined_workspace_lease(quarantine, lease_path.parent)
-            raise WorkspaceLeaseConflict(
-                f"workspace identity appeared during recovery: {lease_path}"
-            )
-        self.append_workspace_lease_audit(
-            {"action": "identityless_recovery_completed", **audit}
-        )
-        shutil.rmtree(quarantine)
-        return None
 
     def _running_task_ids_for_project(self, project_id: str) -> list[str]:
         try:
@@ -692,7 +715,9 @@ class ProjectStore:
             moved_marker is None
             or self._lease_identity(moved_marker) != self._lease_identity(expected)
             or moved_marker.host != socket.gethostname()
-            or _pid_is_alive(moved_marker.pid)
+            or _process_identity_is_live(
+                moved_marker.pid, moved_marker.process_start_id
+            )
         ):
             self._restore_quarantined_workspace_lease(quarantine, lease_dir)
             raise WorkspaceLeaseConflict(
@@ -703,12 +728,15 @@ class ProjectStore:
         return True
 
     @staticmethod
-    def _lease_identity(lease: WorkspaceLease) -> tuple[str, str, str, int, str]:
+    def _lease_identity(
+        lease: WorkspaceLease,
+    ) -> tuple[str, str, str, int, str, str]:
         return (
             lease.owner_id,
             lease.project_id,
             lease.host,
             lease.pid,
+            lease.process_start_id,
             lease.runtime_id,
         )
 
@@ -778,6 +806,7 @@ class ProjectStore:
                 last_seen_at=str(payload["last_seen_at"]),
                 host=str(payload.get("host", "")),
                 pid=int(payload.get("pid", 0)),
+                process_start_id=str(payload.get("process_start_id", "")),
                 runtime_id=str(payload.get("runtime_id", "")),
                 path=path,
             )
@@ -796,6 +825,7 @@ class ProjectStore:
                 last_seen_at=str(payload["last_seen_at"]),
                 host=str(payload.get("host", "")),
                 pid=int(payload.get("pid", 0)),
+                process_start_id=str(payload.get("process_start_id", "")),
                 runtime_id=str(payload.get("runtime_id", "")),
                 path=path,
             )

@@ -497,6 +497,7 @@ class TestWorkspaceLease:
         assert payload["host"]
         assert payload["pid"] > 0
         assert payload["runtime_id"]
+        assert payload["process_start_id"]
         marker = json.loads(
             (lease.path.parent / "claim.json").read_text(encoding="utf-8")
         )
@@ -637,26 +638,67 @@ class TestWorkspaceLease:
         with pytest.raises(WorkspaceLeaseConflict, match="explicit recovery"):
             store.claim_workspace_lease("p1", "owner-a")
 
-    def test_identityless_lease_has_audited_break_glass_recovery(
+    def test_identityless_lease_remains_fenced_without_creator_identity(
         self, store: ProjectStore, workspace: Path
     ) -> None:
         store.create_project("brief", workspace, project_id="p1")
         lease_path = store.workspace_lease_path("p1")
         lease_path.parent.mkdir(parents=True)
 
+        with pytest.raises(
+            WorkspaceLeaseConflict, match="has no recoverable claim identity"
+        ):
+            store.recover_workspace_lease_for_workspace(
+                workspace, "operator", "claim process died before identity publication"
+            )
+
+        assert lease_path.parent.exists()
+
+    def test_claim_fails_before_publish_when_runtime_identity_is_unavailable(
+        self,
+        store: ProjectStore,
+        workspace: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        monkeypatch.setattr("zenith_harness.storage._runtime_identity", lambda: "")
+
+        with pytest.raises(WorkspaceLeaseConflict, match="runtime identity"):
+            store.claim_workspace_lease("p1", "owner-a")
+
+        assert not store.workspace_lease_path("p1").parent.exists()
+
+    def test_recovery_distinguishes_reused_live_pid_by_process_start(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        lease = store.claim_workspace_lease("p1", "owner-a")
+        for name in ("claim.json", "owner.json"):
+            path = lease.path.parent / name
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["process_start_id"] = "recycled-process-start"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
         recovered = store.recover_workspace_lease_for_workspace(
-            workspace, "operator", "claim process died before identity publication"
+            workspace, "operator", "recorded PID was reused"
         )
 
-        assert recovered is None
-        assert not lease_path.parent.exists()
-        audit_path = store.config.harness_home / "leases" / "recovery-log.jsonl"
-        audit = [
-            json.loads(line)
-            for line in audit_path.read_text(encoding="utf-8").splitlines()
-        ]
-        assert audit[-2]["action"] == "identityless_recovery_authorized"
-        assert audit[-1]["action"] == "identityless_recovery_completed"
+        assert recovered is not None
+        assert not lease.path.parent.exists()
+
+    def test_reused_pid_cannot_refresh_the_previous_process_lease(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        lease = store.claim_workspace_lease("p1", "owner-a")
+        for name in ("claim.json", "owner.json"):
+            path = lease.path.parent / name
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["process_start_id"] = "recycled-process-start"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+        with pytest.raises(WorkspaceLeaseConflict, match="explicit recovery"):
+            store.claim_workspace_lease("p1", "owner-a")
 
     def test_recovery_refuses_different_boot_or_pid_namespace(
         self, store: ProjectStore, workspace: Path
