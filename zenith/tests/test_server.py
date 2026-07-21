@@ -362,6 +362,27 @@ async def test_second_server_cannot_start_another_project_in_owned_workspace(
     assert len(ProjectStore(config).list_projects()) == 1
 
 
+@pytest.mark.asyncio
+async def test_whitespace_controller_ids_fall_back_to_unique_server_owners(
+    config: HarnessConfig, workspace: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ZENITH_CONTROLLER_ID", "   ")
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+    first = create_orchestrator_server(config)
+    second = create_orchestrator_server(config)
+    started = await first.call_tool(
+        "start_project", {"brief": "Owned.", "workspace_dir": str(workspace)}
+    )
+    pid = started.structured_content["projectId"]
+
+    blocked = await second.call_tool(
+        "abort_project", {"project_id": pid, "reason": "must not share blank id"}
+    )
+    assert blocked.structured_content["error"] == "workspace_owned"
+
+
 # ---------------------------------------------------------------------------
 # Regression: dispatcher that calls asyncio.run() must not crash the MCP
 # event loop. Reproduces:

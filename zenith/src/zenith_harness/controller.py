@@ -11,6 +11,7 @@ The coordinator is constructed per-invocation; it has no in-memory state.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from .config import HarnessConfig
 from .coordinator import MissionCoordinator
@@ -76,6 +77,12 @@ class ProjectController:
     ) -> Envelope:
         if not brief.strip():
             raise ToolError("invalid_brief", "brief is empty")
+        requested_workspace = Path(workspace_dir).expanduser()
+        if not requested_workspace.is_absolute() or not requested_workspace.is_dir():
+            raise ToolError(
+                "invalid_workspace",
+                "workspace_dir must be an existing absolute directory",
+            )
         project_id = self.store.generate_project_id(brief)
         if owner_id is not None:
             try:

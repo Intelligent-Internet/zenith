@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import socket
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -202,44 +203,55 @@ class ProjectStore:
         across MCP calls and processes until the owning controller explicitly
         releases it. Different workspaces remain independently claimable.
         """
-        if not owner_id.strip():
+        owner_id = owner_id.strip()
+        if not owner_id:
             raise ValueError("owner_id is empty")
-        workspace = Path(workspace_dir).expanduser().resolve()
+        requested_workspace = Path(workspace_dir).expanduser()
+        if not requested_workspace.is_absolute():
+            raise ValueError("workspace_dir must be absolute")
+        workspace = requested_workspace.resolve()
+        if not workspace.is_dir():
+            raise FileNotFoundError(f"workspace_dir does not exist: {workspace}")
         lease_path = self._workspace_lease_path(workspace)
         lease_dir = lease_path.parent
         lease_dir.parent.mkdir(parents=True, exist_ok=True)
-        created = False
-        try:
-            lease_dir.mkdir()
-            created = True
-        except FileExistsError:
-            pass
-
-        if not created:
-            current = self._load_workspace_lease_record(lease_path)
-            if current is None:
-                for _ in range(5):
-                    time.sleep(0.05)
-                    current = self._load_workspace_lease_record(lease_path)
-                    if current is not None:
-                        break
-            if current is None:
-                raise WorkspaceLeaseConflict(
-                    f"workspace lease is incomplete: {lease_path}"
-                )
-            if (
-                current.owner_id != owner_id
-                or current.project_id != project_id
-            ):
-                raise WorkspaceLeaseConflict(
-                    "workspace already owned by "
-                    f"owner={current.owner_id} project={current.project_id}; "
-                    f"requesting owner={owner_id} project={project_id}; "
-                    f"lease={lease_path}"
-                )
-            claimed_at = current.claimed_at
-        else:
-            claimed_at = utc_now_iso()
+        claimed_at = ""
+        claimed = False
+        for _attempt in range(4):
+            try:
+                lease_dir.mkdir()
+                claimed_at = utc_now_iso()
+                claimed = True
+                break
+            except FileExistsError:
+                current = self._load_workspace_lease_record(lease_path)
+                if current is None:
+                    for _ in range(20):
+                        time.sleep(0.05)
+                        current = self._load_workspace_lease_record(lease_path)
+                        if current is not None:
+                            break
+                if current is None:
+                    if self._recover_incomplete_workspace_lease(lease_dir):
+                        continue
+                    continue
+                if (
+                    current.owner_id != owner_id
+                    or current.project_id != project_id
+                ):
+                    raise WorkspaceLeaseConflict(
+                        "workspace already owned by "
+                        f"owner={current.owner_id} project={current.project_id}; "
+                        f"requesting owner={owner_id} project={project_id}; "
+                        f"lease={lease_path}"
+                    )
+                claimed_at = current.claimed_at
+                claimed = True
+                break
+        if not claimed:
+            raise WorkspaceLeaseConflict(
+                f"workspace lease changed repeatedly during recovery: {lease_path}"
+            )
 
         now = utc_now_iso()
         payload = {
@@ -251,7 +263,7 @@ class ProjectStore:
             "claimed_at": claimed_at,
             "last_seen_at": now,
         }
-        atomic_write_json(lease_path, payload)
+        self._write_workspace_lease_record(lease_path, payload)
         return WorkspaceLease(
             owner_id=owner_id,
             project_id=project_id,
@@ -287,8 +299,62 @@ class ProjectStore:
                 f"requesting release owner={owner_id} project={project_id}; "
                 f"lease={lease_path}"
             )
-        lease_path.unlink()
-        lease_path.parent.rmdir()
+        released_dir = lease_path.parent.with_name(
+            f"{lease_path.parent.name}.released.{os.getpid()}.{time.time_ns()}"
+        )
+        try:
+            os.replace(lease_path.parent, released_dir)
+        except FileNotFoundError as exc:
+            raise WorkspaceLeaseConflict(
+                f"workspace lease changed during release: {lease_path}"
+            ) from exc
+        shutil.rmtree(released_dir)
+
+    def _recover_incomplete_workspace_lease(self, lease_dir: Path) -> bool:
+        """Fence and remove an ownerless claim directory after bounded polling."""
+        quarantine = lease_dir.with_name(
+            f"{lease_dir.name}.incomplete.{os.getpid()}.{time.time_ns()}"
+        )
+        try:
+            os.replace(lease_dir, quarantine)
+        except FileNotFoundError:
+            return False
+
+        moved_path = quarantine / "owner.json"
+        moved = self._load_workspace_lease_record(moved_path)
+        if moved is not None:
+            try:
+                os.replace(quarantine, lease_dir)
+            except OSError as exc:
+                raise WorkspaceLeaseConflict(
+                    f"concurrent workspace lease repair preserved at {quarantine}"
+                ) from exc
+            raise WorkspaceLeaseConflict(
+                "workspace already owned by "
+                f"owner={moved.owner_id} project={moved.project_id}; "
+                f"lease={lease_dir / 'owner.json'}"
+            )
+
+        shutil.rmtree(quarantine)
+        return True
+
+    @staticmethod
+    def _write_workspace_lease_record(path: Path, payload: object) -> None:
+        """Publish one lease record without shared temp-file names."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, raw_tmp = tempfile.mkstemp(
+            prefix="owner.json.tmp.", dir=path.parent, text=True
+        )
+        tmp_path = Path(raw_tmp)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, ensure_ascii=False)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
     @staticmethod
     def _load_workspace_lease_record(path: Path) -> WorkspaceLease | None:

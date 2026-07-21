@@ -509,3 +509,58 @@ class TestWorkspaceLease:
             results = list(pool.map(claim, ["owner-a", "owner-b"]))
         assert results.count("blocked") == 1
         assert len({value for value in results if value != "blocked"}) == 1
+
+    def test_ownerless_crashed_claim_is_fenced_and_recovered(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        lease = store.claim_workspace_lease("p1", "owner-a")
+        lease.path.unlink()
+
+        recovered = store.claim_workspace_lease("p1", "owner-b")
+        assert recovered.owner_id == "owner-b"
+
+    def test_malformed_crashed_claim_is_fenced_and_recovered(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        lease = store.claim_workspace_lease("p1", "owner-a")
+        lease.path.write_text("{partial", encoding="utf-8")
+
+        recovered = store.claim_workspace_lease("p1", "owner-b")
+        assert recovered.owner_id == "owner-b"
+
+    def test_release_removes_abandoned_temp_files_atomically(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        lease = store.claim_workspace_lease("p1", "owner-a")
+        (lease.path.parent / "owner.json.tmp.crashed").write_text(
+            "partial", encoding="utf-8"
+        )
+
+        store.release_workspace_lease("p1", "owner-a")
+        assert store.claim_workspace_lease("p1", "owner-b").owner_id == "owner-b"
+
+    def test_concurrent_same_owner_refreshes_use_unique_temp_files(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        store.claim_workspace_lease("p1", "owner-a")
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(
+                pool.map(
+                    lambda _: store.claim_workspace_lease("p1", "owner-a").owner_id,
+                    range(8),
+                )
+            )
+        assert results == ["owner-a"] * 8
+
+    def test_claim_requires_existing_absolute_workspace(
+        self, store: ProjectStore
+    ) -> None:
+        with pytest.raises(ValueError, match="absolute"):
+            store.claim_workspace_lease_for_workspace(
+                "relative-workspace", "p1", "owner-a"
+            )

@@ -109,18 +109,25 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
     project_locks: dict[str, asyncio.Lock] = {}
     locks_guard = asyncio.Lock()
     server_instance_owner = f"server:{uuid4()}"
-    explicit_owner = (
-        os.environ.get("ZENITH_CONTROLLER_ID")
-        or os.environ.get("CODEX_THREAD_ID")
-        or os.environ.get("CLAUDE_CODE_SESSION_ID")
-        or os.environ.get("CLAUDE_SESSION_ID")
+    explicit_owner = next(
+        (
+            value.strip()
+            for value in (
+                os.environ.get("ZENITH_CONTROLLER_ID"),
+                os.environ.get("CODEX_THREAD_ID"),
+                os.environ.get("CLAUDE_CODE_SESSION_ID"),
+                os.environ.get("CLAUDE_SESSION_ID"),
+            )
+            if value and value.strip()
+        ),
+        None,
     )
 
-    def _controller_owner(ctx: Context | None) -> str:
+    def _controller_owner(_ctx: Context | None) -> str:
         if explicit_owner:
             return explicit_owner
-        if ctx is not None and ctx.request_context is not None:
-            return ctx.session_id
+        # FastMCP session ids are scoped to one server and can repeat across
+        # processes. The server UUID is globally distinct for the fallback path.
         return server_instance_owner
 
     def _claim(project_id: str, owner_id: str) -> None:
