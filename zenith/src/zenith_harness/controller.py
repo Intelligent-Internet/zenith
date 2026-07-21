@@ -272,12 +272,18 @@ class ProjectController:
         return self._build_envelope(project_id, dag_mode="full")
 
     def abort_project(
-        self, project_id: str, reason: str, owner_id: str | None = None
+        self, project_id: str, reason: str, owner_id: str
     ) -> Envelope:
+        try:
+            self.store.claim_workspace_lease(project_id, owner_id)
+        except ValueError as exc:
+            raise ToolError("invalid_owner", str(exc)) from exc
+        except WorkspaceLeaseConflict as exc:
+            raise ToolError("workspace_owned", str(exc)) from exc
         record = self.store.load_project(project_id)
         state = self.store.load_state(project_id)
         mid = self._current_mission_id(record, state)
-        if owner_id is not None and mid is not None:
+        if mid is not None:
             task_state = self.store.load_task_state(project_id, mid)
             running = sorted(
                 task_id
@@ -300,13 +306,12 @@ class ProjectController:
         self.store.clear_attention(project_id)
         self.store.save_state(project_id, Aborted(reason=reason))
         envelope = self._build_envelope(project_id, dag_mode="none")
-        if owner_id is not None:
-            try:
-                self.store.release_workspace_lease(project_id, owner_id)
-            except ValueError as exc:
-                raise ToolError("invalid_owner", str(exc)) from exc
-            except WorkspaceLeaseConflict as exc:
-                raise ToolError("workspace_owned", str(exc)) from exc
+        try:
+            self.store.release_workspace_lease(project_id, owner_id)
+        except ValueError as exc:
+            raise ToolError("invalid_owner", str(exc)) from exc
+        except WorkspaceLeaseConflict as exc:
+            raise ToolError("workspace_owned", str(exc)) from exc
         return envelope
 
     # ------------------------------------------------------------------

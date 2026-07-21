@@ -299,11 +299,10 @@ class ProjectStore:
                             f"project={incomplete_marker.project_id} "
                             f"pid={incomplete_marker.pid}; lease={lease_path}"
                         )
-                    if self._recover_incomplete_workspace_lease(
-                        lease_dir, incomplete_marker
-                    ):
-                        continue
-                    continue
+                    raise WorkspaceLeaseConflict(
+                        "workspace has an incomplete dead-controller claim; "
+                        f"explicit recovery is required; lease={lease_path}"
+                    )
                 if (
                     current.owner_id != owner_id
                     or current.project_id != project_id
@@ -428,6 +427,11 @@ class ProjectStore:
                 f"requesting release owner={owner_id} project={project_id}; "
                 f"lease={lease_path}"
             )
+        if current.host != socket.gethostname() or current.pid != os.getpid():
+            raise WorkspaceLeaseConflict(
+                "workspace release requires the exact live controller process; "
+                f"lease={lease_path}"
+            )
         released_dir = lease_path.parent.with_name(
             f"{lease_path.parent.name}.released.{os.getpid()}.{time.time_ns()}"
         )
@@ -478,6 +482,13 @@ class ProjectStore:
                 "cannot recover live workspace controller "
                 f"pid={current.pid}; lease={lease_path}"
             )
+        running = self._running_task_ids_for_project(current.project_id)
+        if running:
+            raise WorkspaceLeaseConflict(
+                "cannot recover while the project has running task records: "
+                + ", ".join(running)
+                + f"; lease={lease_path}"
+            )
 
         recovery_audit = {
             "workspace_dir": str(workspace),
@@ -519,6 +530,24 @@ class ProjectStore:
         )
         shutil.rmtree(quarantine)
         return moved
+
+    def _running_task_ids_for_project(self, project_id: str) -> list[str]:
+        try:
+            record = self.load_project(project_id)
+        except FileNotFoundError:
+            return []
+        mission_id = record.current_mission_id
+        if mission_id is None:
+            return []
+        try:
+            state = self.load_task_state(project_id, mission_id)
+        except FileNotFoundError:
+            return []
+        return sorted(
+            task_id
+            for task_id, entry in state.tasks.items()
+            if entry.status == "running"
+        )
 
     def append_workspace_lease_audit(self, payload: dict[str, object]) -> None:
         audit_path = self.config.harness_home / "leases" / "recovery-log.jsonl"

@@ -649,11 +649,28 @@ class TestAbortProject:
             config, MockDispatcher(lambda r: WorkHandoff(node_id=r.task.id, done=True, report="")),
             MockTerminalReviewer(TerminalReviewHandoff(done=True, report="")),
         )
-        pid = _seed_project(controller, workspace)
+        started = controller.start_project("Brief.", str(workspace), "owner-a")
+        pid = started.projectId
+        contract_dir = controller.store.ensure_contract_dir(pid, "mission-001")
+        (contract_dir / "VAL-001.md").write_text("# VAL-001\n\nStatement body.\n")
         controller.submit_plan(pid, _simple_tl())
-        env = controller.abort_project(pid, "user requested")
+        env = controller.abort_project(pid, "user requested", "owner-a")
         assert env.state.state == "aborted"
         assert env.dag is None
+
+    def test_non_owner_cannot_abort_state(
+        self, config: HarnessConfig, workspace: Path
+    ) -> None:
+        controller = ProjectController(
+            config, MockDispatcher(lambda r: WorkHandoff(node_id=r.task.id, done=True, report="")),
+            MockTerminalReviewer(TerminalReviewHandoff(done=True, report="")),
+        )
+        started = controller.start_project("Brief.", str(workspace), "owner-a")
+
+        with pytest.raises(ToolError, match="workspace already owned"):
+            controller.abort_project(started.projectId, "hostile", "owner-b")
+
+        assert controller.inspect_project(started.projectId).state.state == "mission_planning"
 
 
 class TestResume:

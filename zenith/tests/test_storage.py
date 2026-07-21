@@ -562,7 +562,7 @@ class TestWorkspaceLease:
 
         assert store.claim_workspace_lease("p1", "owner-a").owner_id == "owner-a"
 
-    def test_ownerless_dead_claim_is_fenced_and_recovered(
+    def test_ownerless_dead_claim_requires_audited_recovery(
         self, store: ProjectStore, workspace: Path
     ) -> None:
         store.create_project("brief", workspace, project_id="p1")
@@ -573,10 +573,15 @@ class TestWorkspaceLease:
         claim["pid"] = 999_999_999
         claim_path.write_text(json.dumps(claim), encoding="utf-8")
 
+        with pytest.raises(WorkspaceLeaseConflict, match="explicit recovery"):
+            store.claim_workspace_lease("p1", "owner-b")
+        store.recover_workspace_lease_for_workspace(
+            workspace, "owner-b", "owner publication crashed"
+        )
         recovered = store.claim_workspace_lease("p1", "owner-b")
         assert recovered.owner_id == "owner-b"
 
-    def test_malformed_dead_claim_is_fenced_and_recovered(
+    def test_malformed_dead_claim_requires_audited_recovery(
         self, store: ProjectStore, workspace: Path
     ) -> None:
         store.create_project("brief", workspace, project_id="p1")
@@ -587,6 +592,11 @@ class TestWorkspaceLease:
         claim["pid"] = 999_999_999
         claim_path.write_text(json.dumps(claim), encoding="utf-8")
 
+        with pytest.raises(WorkspaceLeaseConflict, match="explicit recovery"):
+            store.claim_workspace_lease("p1", "owner-b")
+        store.recover_workspace_lease_for_workspace(
+            workspace, "owner-b", "owner publication was malformed"
+        )
         recovered = store.claim_workspace_lease("p1", "owner-b")
         assert recovered.owner_id == "owner-b"
 

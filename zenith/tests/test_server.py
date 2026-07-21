@@ -484,6 +484,58 @@ async def test_live_workspace_lease_cannot_be_recovered(
     assert "live workspace controller" in recovered.structured_content["message"]
 
 
+@pytest.mark.asyncio
+async def test_dead_controller_recovery_refuses_running_worker_records(
+    config: HarnessConfig, workspace: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ZENITH_CONTROLLER_ID", "owner-a")
+    server = create_orchestrator_server(config)
+    started = await server.call_tool(
+        "start_project", {"brief": "Owned.", "workspace_dir": str(workspace)}
+    )
+    pid = started.structured_content["projectId"]
+    store = ProjectStore(config)
+    contract_dir = store.ensure_contract_dir(pid, "mission-001")
+    (contract_dir / "VAL-001.md").write_text("# VAL-001\n")
+    await server.call_tool(
+        "submit_plan",
+        {
+            "project_id": pid,
+            "task_list": {
+                "tasks": [
+                    {
+                        "id": "w1",
+                        "type": "work",
+                        "body": "do",
+                        "targets": ["VAL-001"],
+                        "skill": "s",
+                        "depends_on": [],
+                    }
+                ]
+            },
+        },
+    )
+    task_state = store.load_task_state(pid, "mission-001")
+    task_state.set_status("w1", "running")
+    store.save_task_state(pid, "mission-001", task_state)
+    lease_path = store.workspace_lease_path(pid)
+    for name in ("claim.json", "owner.json"):
+        path = lease_path.parent / name
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["pid"] = 999_999_999
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setenv("ZENITH_CONTROLLER_ID", "owner-b")
+    recovery_server = create_orchestrator_server(config)
+    recovered = await recovery_server.call_tool(
+        "recover_workspace_lease",
+        {"workspace_dir": str(workspace), "reason": "controller crashed"},
+    )
+
+    assert recovered.structured_content["error"] == "workspace_recovery_blocked"
+    assert "running task records" in recovered.structured_content["message"]
+
+
 # ---------------------------------------------------------------------------
 # Regression: dispatcher that calls asyncio.run() must not crash the MCP
 # event loop. Reproduces:
