@@ -612,6 +612,20 @@ class TestWorkspaceLease:
                 workspace, "p1", "x" * 201
             )
 
+    def test_dead_process_cannot_silently_reuse_same_owner_id(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        lease = store.claim_workspace_lease("p1", "owner-a")
+        for name in ("claim.json", "owner.json"):
+            path = lease.path.parent / name
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["pid"] = 999_999_999
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+        with pytest.raises(WorkspaceLeaseConflict, match="explicit recovery"):
+            store.claim_workspace_lease("p1", "owner-a")
+
     def test_release_removes_abandoned_temp_files_atomically(
         self, store: ProjectStore, workspace: Path
     ) -> None:

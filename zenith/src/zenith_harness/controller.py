@@ -125,20 +125,7 @@ class ProjectController:
         self,
         project_id: str,
         owner_id: str,
-        *,
-        force: bool = False,
-        reason: str | None = None,
     ) -> None:
-        if force and (not reason or not reason.strip()):
-            raise ToolError(
-                "recovery_reason_required",
-                "forced release requires a non-empty reason",
-            )
-        if reason is not None and len(reason.strip()) > 500:
-            raise ToolError(
-                "invalid_recovery",
-                "recovery reason must be at most 500 characters",
-            )
         try:
             self.store.claim_workspace_lease(project_id, owner_id)
         except ValueError as exc:
@@ -148,7 +135,6 @@ class ProjectController:
         record = self.store.load_project(project_id)
         state = self.store.load_state(project_id)
         mission_id = self._current_mission_id(record, state)
-        forced_audit: dict[str, object] | None = None
         if mission_id is not None:
             task_state = self.store.load_task_state(project_id, mission_id)
             running = sorted(
@@ -157,21 +143,10 @@ class ProjectController:
                 if entry.status == "running"
             )
             if running:
-                if not force:
-                    raise ToolError(
-                        "workspace_busy",
-                        "cannot release controller ownership while tasks are running: "
-                        + ", ".join(running),
-                    )
-                assert reason is not None
-                forced_audit = {
-                    "project_id": project_id,
-                    "owner_id": owner_id,
-                    "running_task_ids": running,
-                    "reason": reason.strip(),
-                }
-                self.store.append_workspace_lease_audit(
-                    {"action": "forced_running_release_authorized", **forced_audit}
+                raise ToolError(
+                    "workspace_busy",
+                    "cannot release controller ownership while tasks are running: "
+                    + ", ".join(running),
                 )
         try:
             self.store.release_workspace_lease(project_id, owner_id)
@@ -179,10 +154,6 @@ class ProjectController:
             raise ToolError("invalid_owner", str(exc)) from exc
         except WorkspaceLeaseConflict as exc:
             raise ToolError("workspace_owned", str(exc)) from exc
-        if forced_audit is not None:
-            self.store.append_workspace_lease_audit(
-                {"action": "forced_running_release_completed", **forced_audit}
-            )
 
     def recover_workspace_lease(
         self, workspace_dir: str, owner_id: str, reason: str
@@ -306,6 +277,19 @@ class ProjectController:
         record = self.store.load_project(project_id)
         state = self.store.load_state(project_id)
         mid = self._current_mission_id(record, state)
+        if owner_id is not None and mid is not None:
+            task_state = self.store.load_task_state(project_id, mid)
+            running = sorted(
+                task_id
+                for task_id, entry in task_state.tasks.items()
+                if entry.status == "running"
+            )
+            if running:
+                raise ToolError(
+                    "workspace_busy",
+                    "cannot abort and release ownership while tasks are running: "
+                    + ", ".join(running),
+                )
         if mid:
             try:
                 self.store.seal_mission(
@@ -317,7 +301,12 @@ class ProjectController:
         self.store.save_state(project_id, Aborted(reason=reason))
         envelope = self._build_envelope(project_id, dag_mode="none")
         if owner_id is not None:
-            self.release_project(project_id, owner_id)
+            try:
+                self.store.release_workspace_lease(project_id, owner_id)
+            except ValueError as exc:
+                raise ToolError("invalid_owner", str(exc)) from exc
+            except WorkspaceLeaseConflict as exc:
+                raise ToolError("workspace_owned", str(exc)) from exc
         return envelope
 
     # ------------------------------------------------------------------

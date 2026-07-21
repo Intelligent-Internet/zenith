@@ -305,7 +305,7 @@ async def test_non_owner_cannot_release_project(
 
 
 @pytest.mark.asyncio
-async def test_owner_must_explicitly_force_release_while_task_is_running(
+async def test_owner_cannot_release_project_while_task_is_running(
     config: HarnessConfig, workspace: Path, monkeypatch
 ) -> None:
     monkeypatch.setenv("ZENITH_CONTROLLER_ID", "owner-a")
@@ -343,25 +343,15 @@ async def test_owner_must_explicitly_force_release_while_task_is_running(
     assert blocked.structured_content["error"] == "workspace_busy"
     assert "w1" in blocked.structured_content["message"]
 
-    missing_reason = await server.call_tool(
-        "release_project", {"project_id": pid, "force": True}
-    )
-    assert missing_reason.structured_content["error"] == "recovery_reason_required"
+    inspected = await server.call_tool("inspect_project", {"project_id": pid})
+    assert inspected.structured_content["state"]["state"] == "mission_running"
 
-    released = await server.call_tool(
-        "release_project",
-        {
-            "project_id": pid,
-            "force": True,
-            "reason": "worker process crashed",
-        },
+    blocked_abort = await server.call_tool(
+        "abort_project", {"project_id": pid, "reason": "must stay fenced"}
     )
-    assert released.structured_content["released"] is True
-    audit_path = config.harness_home / "leases" / "recovery-log.jsonl"
-    audit = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
-    assert audit["action"] == "forced_running_release_completed"
-    assert audit["running_task_ids"] == ["w1"]
-    assert audit["reason"] == "worker process crashed"
+    assert blocked_abort.structured_content["error"] == "workspace_busy"
+    inspected = await server.call_tool("inspect_project", {"project_id": pid})
+    assert inspected.structured_content["state"]["state"] == "mission_running"
 
 
 @pytest.mark.asyncio

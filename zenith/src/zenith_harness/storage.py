@@ -15,8 +15,9 @@ See `specs/memory_v2/PRODUCT.md` and `specs/task_list/PRODUCT.md`.
 """
 from __future__ import annotations
 
-import json
+import fcntl
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -318,10 +319,15 @@ class ProjectStore:
                         "same owner id is active on another host "
                         f"({current.host}); lease={lease_path}"
                     )
-                if current.pid != os.getpid() and _pid_is_alive(current.pid):
+                if current.pid != os.getpid():
+                    if _pid_is_alive(current.pid):
+                        raise WorkspaceLeaseConflict(
+                            "same owner id is active in another controller process "
+                            f"pid={current.pid}; lease={lease_path}"
+                        )
                     raise WorkspaceLeaseConflict(
-                        "same owner id is active in another controller process "
-                        f"pid={current.pid}; lease={lease_path}"
+                        "same owner id belongs to a dead controller process; "
+                        f"explicit recovery is required; lease={lease_path}"
                     )
                 lease_dir_fd = os.open(
                     lease_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
@@ -525,12 +531,14 @@ class ProjectStore:
         encoded = json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n"
         fd = os.open(audit_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
             remaining = memoryview(encoded.encode("utf-8"))
             while remaining:
                 written = os.write(fd, remaining)
                 remaining = remaining[written:]
             os.fsync(fd)
         finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
     def _recover_incomplete_workspace_lease(

@@ -109,7 +109,7 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
     # read-only and stays uncontended so recovery audits remain possible.
     project_locks: dict[str, asyncio.Lock] = {}
     locks_guard = asyncio.Lock()
-    server_instance_owner = f"server:{uuid4()}"
+    server_instance_owner: tuple[int, str] | None = None
     explicit_owner = next(
         (
             value.strip()
@@ -125,12 +125,16 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
     )
 
     def _controller_owner(_ctx: Context | None) -> str:
+        nonlocal server_instance_owner
         if explicit_owner:
             return explicit_owner
         # Existing init configs do not inject a dynamic task id. A process-unique
         # fallback still provides exclusive ownership; the PID-bound recovery tool
         # makes a crashed fallback owner safely recoverable.
-        return server_instance_owner
+        process_id = os.getpid()
+        if server_instance_owner is None or server_instance_owner[0] != process_id:
+            server_instance_owner = (process_id, f"server:{process_id}:{uuid4()}")
+        return server_instance_owner[1]
 
     def _claim(project_id: str, owner_id: str) -> None:
         controller.claim_project(project_id, owner_id)
@@ -338,20 +342,6 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
     )
     async def release_project(
         project_id: Annotated[str, Field(description="Project id.")],
-        force: Annotated[
-            bool,
-            Field(
-                default=False,
-                description="Allow release with stuck running task records.",
-            ),
-        ] = False,
-        reason: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description="Required audit reason when force is true.",
-            ),
-        ] = None,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         async with await _project_lock(project_id):
@@ -361,13 +351,10 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
                     controller.release_project,
                     project_id,
                     owner_id,
-                    force=force,
-                    reason=reason,
                 )
                 return {
                     "released": True,
                     "projectId": project_id,
-                    "forced": force,
                 }
             except ToolError as exc:
                 return _to_payload(exc)

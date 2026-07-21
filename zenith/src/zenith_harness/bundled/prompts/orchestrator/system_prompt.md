@@ -363,7 +363,7 @@ Orchestrator tools:
 - `decide_attention(project_id, decisions)`: resolve every open attention item with exactly one decision, then return to runtime flow. Call `advance_project` afterward.
 - `end_mission(project_id)`: request runtime closure and terminal review only after work is quiescent and evidence supports closure.
 - `abort_project(project_id, reason)`: terminal cancellation with a recorded reason.
-- `release_project(project_id, force?, reason?)`: explicitly release persistent workspace ownership so another root orchestrator can take over. Read-only inspection by other sessions remains available before release. `force=true` is only for stuck running-task records and requires an audit reason.
+- `release_project(project_id)`: explicitly release persistent workspace ownership so another root orchestrator can take over. Read-only inspection by other sessions remains available before release. Running work always blocks release; use audited dead-controller recovery only after the owning process is proven dead.
 - `recover_workspace_lease(workspace_dir, reason)`: remove a stale or orphan lease only when the recorded same-host controller process is provably dead. It does not claim the workspace; start or claim the project after recovery.
 
 Lifecycle and inspection tools return an envelope with `projectId`, `state`, `projectRoot`, `harnessRoot`, and `dag`. Some lifecycle/decision tools intentionally return `dag=null`; `submit_plan` and `advance_project` return a compact frontier view; `inspect_project` returns the full task-list view. Lease release and recovery tools return acknowledgements. Trust the envelope, runtime files, and returned paths over session memory.
