@@ -290,7 +290,7 @@ def abort_project_cmd(project_id: str, reason: str, owner_id: str | None) -> Non
         )
     try:
         controller.claim_project(project_id, resolved_owner)
-        env = controller.abort_project(project_id, reason)
+        env = controller.abort_project(project_id, reason, resolved_owner)
     except ToolError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Aborted {project_id}: state={env.state.state}")

@@ -494,6 +494,13 @@ class TestWorkspaceLease:
         assert payload["workspace_dir"] == str(workspace.resolve())
         assert payload["claimed_at"]
         assert payload["last_seen_at"]
+        assert payload["host"]
+        assert payload["pid"] > 0
+        marker = json.loads(
+            (lease.path.parent / "claim.json").read_text(encoding="utf-8")
+        )
+        assert marker["owner_id"] == "owner-a"
+        assert marker["pid"] == payload["pid"]
 
     def test_atomic_claim_has_exactly_one_winner(
         self, store: ProjectStore, workspace: Path
@@ -511,7 +518,7 @@ class TestWorkspaceLease:
         assert results.count("blocked") == 1
         assert len({value for value in results if value != "blocked"}) == 1
 
-    def test_recovered_claim_cannot_be_overwritten_by_stale_publisher(
+    def test_live_incomplete_claim_cannot_be_overwritten_by_second_owner(
         self,
         store: ProjectStore,
         workspace: Path,
@@ -539,37 +546,71 @@ class TestWorkspaceLease:
             except WorkspaceLeaseConflict:
                 return "blocked"
 
+        def claim_second() -> str:
+            try:
+                return store.claim_workspace_lease("p1", "owner-b").owner_id
+            except WorkspaceLeaseConflict:
+                return "blocked"
+
         with ThreadPoolExecutor(max_workers=2) as pool:
             first = pool.submit(claim_first)
             assert first_ready.wait(timeout=2)
-            second = pool.submit(
-                lambda: store.claim_workspace_lease("p1", "owner-b").owner_id
-            )
-            assert second.result(timeout=5) == "owner-b"
+            second = pool.submit(claim_second)
+            assert second.result(timeout=5) == "blocked"
             allow_first_publish.set()
-            assert first.result(timeout=5) == "blocked"
+            assert first.result(timeout=5) == "owner-a"
 
-        assert store.claim_workspace_lease("p1", "owner-b").owner_id == "owner-b"
+        assert store.claim_workspace_lease("p1", "owner-a").owner_id == "owner-a"
 
-    def test_ownerless_crashed_claim_is_fenced_and_recovered(
+    def test_ownerless_dead_claim_is_fenced_and_recovered(
         self, store: ProjectStore, workspace: Path
     ) -> None:
         store.create_project("brief", workspace, project_id="p1")
         lease = store.claim_workspace_lease("p1", "owner-a")
         lease.path.unlink()
+        claim_path = lease.path.parent / "claim.json"
+        claim = json.loads(claim_path.read_text(encoding="utf-8"))
+        claim["pid"] = 999_999_999
+        claim_path.write_text(json.dumps(claim), encoding="utf-8")
 
         recovered = store.claim_workspace_lease("p1", "owner-b")
         assert recovered.owner_id == "owner-b"
 
-    def test_malformed_crashed_claim_is_fenced_and_recovered(
+    def test_malformed_dead_claim_is_fenced_and_recovered(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        lease = store.claim_workspace_lease("p1", "owner-a")
+        lease.path.write_text("{partial", encoding="utf-8")
+        claim_path = lease.path.parent / "claim.json"
+        claim = json.loads(claim_path.read_text(encoding="utf-8"))
+        claim["pid"] = 999_999_999
+        claim_path.write_text(json.dumps(claim), encoding="utf-8")
+
+        recovered = store.claim_workspace_lease("p1", "owner-b")
+        assert recovered.owner_id == "owner-b"
+
+    def test_malformed_live_claim_remains_fenced(
         self, store: ProjectStore, workspace: Path
     ) -> None:
         store.create_project("brief", workspace, project_id="p1")
         lease = store.claim_workspace_lease("p1", "owner-a")
         lease.path.write_text("{partial", encoding="utf-8")
 
-        recovered = store.claim_workspace_lease("p1", "owner-b")
-        assert recovered.owner_id == "owner-b"
+        with pytest.raises(WorkspaceLeaseConflict, match="incomplete active claim"):
+            store.claim_workspace_lease("p1", "owner-b")
+
+    def test_owner_id_is_bounded_and_safe(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        with pytest.raises(ValueError, match="unsupported"):
+            store.claim_workspace_lease_for_workspace(
+                workspace, "p1", "owner with spaces"
+            )
+        with pytest.raises(ValueError, match="at most 200"):
+            store.claim_workspace_lease_for_workspace(
+                workspace, "p1", "x" * 201
+            )
 
     def test_release_removes_abandoned_temp_files_atomically(
         self, store: ProjectStore, workspace: Path

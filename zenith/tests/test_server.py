@@ -68,6 +68,7 @@ async def test_orchestrator_tools_registered(config: HarnessConfig) -> None:
         "inspect_project",
         "abort_project",
         "release_project",
+        "recover_workspace_lease",
     }
 
 
@@ -304,7 +305,7 @@ async def test_non_owner_cannot_release_project(
 
 
 @pytest.mark.asyncio
-async def test_owner_cannot_release_project_while_task_is_running(
+async def test_owner_must_explicitly_force_release_while_task_is_running(
     config: HarnessConfig, workspace: Path, monkeypatch
 ) -> None:
     monkeypatch.setenv("ZENITH_CONTROLLER_ID", "owner-a")
@@ -342,6 +343,26 @@ async def test_owner_cannot_release_project_while_task_is_running(
     assert blocked.structured_content["error"] == "workspace_busy"
     assert "w1" in blocked.structured_content["message"]
 
+    missing_reason = await server.call_tool(
+        "release_project", {"project_id": pid, "force": True}
+    )
+    assert missing_reason.structured_content["error"] == "recovery_reason_required"
+
+    released = await server.call_tool(
+        "release_project",
+        {
+            "project_id": pid,
+            "force": True,
+            "reason": "worker process crashed",
+        },
+    )
+    assert released.structured_content["released"] is True
+    audit_path = config.harness_home / "leases" / "recovery-log.jsonl"
+    audit = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert audit["action"] == "forced_running_release_completed"
+    assert audit["running_task_ids"] == ["w1"]
+    assert audit["reason"] == "worker process crashed"
+
 
 @pytest.mark.asyncio
 async def test_second_server_cannot_start_another_project_in_owned_workspace(
@@ -363,7 +384,7 @@ async def test_second_server_cannot_start_another_project_in_owned_workspace(
 
 
 @pytest.mark.asyncio
-async def test_whitespace_controller_ids_fall_back_to_unique_server_owners(
+async def test_missing_controller_identity_uses_unique_process_owners(
     config: HarnessConfig, workspace: Path, monkeypatch
 ) -> None:
     monkeypatch.setenv("ZENITH_CONTROLLER_ID", "   ")
@@ -381,6 +402,96 @@ async def test_whitespace_controller_ids_fall_back_to_unique_server_owners(
         "abort_project", {"project_id": pid, "reason": "must not share blank id"}
     )
     assert blocked.structured_content["error"] == "workspace_owned"
+
+
+@pytest.mark.asyncio
+async def test_invalid_controller_identity_returns_structured_error(
+    config: HarnessConfig, workspace: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ZENITH_CONTROLLER_ID", "owner with spaces")
+    server = create_orchestrator_server(config)
+
+    started = await server.call_tool(
+        "start_project", {"brief": "Owned.", "workspace_dir": str(workspace)}
+    )
+
+    assert started.structured_content["error"] == "invalid_owner"
+
+
+@pytest.mark.asyncio
+async def test_abort_releases_workspace_for_next_controller(
+    config: HarnessConfig, workspace: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ZENITH_CONTROLLER_ID", "owner-a")
+    first = create_orchestrator_server(config)
+    started = await first.call_tool(
+        "start_project", {"brief": "Owned.", "workspace_dir": str(workspace)}
+    )
+    pid = started.structured_content["projectId"]
+    aborted = await first.call_tool(
+        "abort_project", {"project_id": pid, "reason": "intentional"}
+    )
+    assert aborted.structured_content["state"]["state"] == "aborted"
+
+    monkeypatch.setenv("ZENITH_CONTROLLER_ID", "owner-b")
+    second = create_orchestrator_server(config)
+    restarted = await second.call_tool(
+        "start_project", {"brief": "Next.", "workspace_dir": str(workspace)}
+    )
+    assert "error" not in restarted.structured_content
+
+
+@pytest.mark.asyncio
+async def test_dead_orphan_lease_can_be_recovered_without_project_record(
+    config: HarnessConfig, workspace: Path, monkeypatch
+) -> None:
+    store = ProjectStore(config)
+    lease = store.claim_workspace_lease_for_workspace(
+        workspace, "ghost-project", "dead-owner"
+    )
+    for name in ("claim.json", "owner.json"):
+        path = lease.path.parent / name
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["pid"] = 999_999_999
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setenv("ZENITH_CONTROLLER_ID", "recovery-owner")
+    server = create_orchestrator_server(config)
+    recovered = await server.call_tool(
+        "recover_workspace_lease",
+        {
+            "workspace_dir": str(workspace),
+            "reason": "controller crashed before project creation",
+        },
+    )
+
+    assert recovered.structured_content["recovered"] is True
+    audit_path = config.harness_home / "leases" / "recovery-log.jsonl"
+    audit = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert audit["action"] == "dead_controller_recovery_completed"
+    assert audit["project_id"] == "ghost-project"
+    started = await server.call_tool(
+        "start_project", {"brief": "Recovered.", "workspace_dir": str(workspace)}
+    )
+    assert "error" not in started.structured_content
+
+
+@pytest.mark.asyncio
+async def test_live_workspace_lease_cannot_be_recovered(
+    config: HarnessConfig, workspace: Path, monkeypatch
+) -> None:
+    store = ProjectStore(config)
+    store.claim_workspace_lease_for_workspace(workspace, "p1", "live-owner")
+    monkeypatch.setenv("ZENITH_CONTROLLER_ID", "recovery-owner")
+    server = create_orchestrator_server(config)
+
+    recovered = await server.call_tool(
+        "recover_workspace_lease",
+        {"workspace_dir": str(workspace), "reason": "must remain fenced"},
+    )
+
+    assert recovered.structured_content["error"] == "workspace_recovery_blocked"
+    assert "live workspace controller" in recovered.structured_content["message"]
 
 
 # ---------------------------------------------------------------------------

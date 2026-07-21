@@ -32,7 +32,7 @@ from .models import (
     TaskListPatch,
     TaskStateFile,
 )
-from .storage import ProjectStore, WorkspaceLeaseConflict
+from .storage import ProjectStore, WorkspaceLease, WorkspaceLeaseConflict
 from .task_list_patch import apply_patch
 from .task_validation import (
     ValidationError,
@@ -89,6 +89,8 @@ class ProjectController:
                 self.store.claim_workspace_lease_for_workspace(
                     workspace_dir, project_id, owner_id
                 )
+            except ValueError as exc:
+                raise ToolError("invalid_owner", str(exc)) from exc
             except WorkspaceLeaseConflict as exc:
                 raise ToolError("workspace_owned", str(exc)) from exc
         try:
@@ -112,13 +114,41 @@ class ProjectController:
     def claim_project(self, project_id: str, owner_id: str) -> None:
         try:
             self.store.claim_workspace_lease(project_id, owner_id)
+        except ValueError as exc:
+            raise ToolError("invalid_owner", str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise ToolError("invalid_workspace", str(exc)) from exc
         except WorkspaceLeaseConflict as exc:
             raise ToolError("workspace_owned", str(exc)) from exc
 
-    def release_project(self, project_id: str, owner_id: str) -> None:
+    def release_project(
+        self,
+        project_id: str,
+        owner_id: str,
+        *,
+        force: bool = False,
+        reason: str | None = None,
+    ) -> None:
+        if force and (not reason or not reason.strip()):
+            raise ToolError(
+                "recovery_reason_required",
+                "forced release requires a non-empty reason",
+            )
+        if reason is not None and len(reason.strip()) > 500:
+            raise ToolError(
+                "invalid_recovery",
+                "recovery reason must be at most 500 characters",
+            )
+        try:
+            self.store.claim_workspace_lease(project_id, owner_id)
+        except ValueError as exc:
+            raise ToolError("invalid_owner", str(exc)) from exc
+        except WorkspaceLeaseConflict as exc:
+            raise ToolError("workspace_owned", str(exc)) from exc
         record = self.store.load_project(project_id)
         state = self.store.load_state(project_id)
         mission_id = self._current_mission_id(record, state)
+        forced_audit: dict[str, object] | None = None
         if mission_id is not None:
             task_state = self.store.load_task_state(project_id, mission_id)
             running = sorted(
@@ -127,15 +157,47 @@ class ProjectController:
                 if entry.status == "running"
             )
             if running:
-                raise ToolError(
-                    "workspace_busy",
-                    "cannot release controller ownership while tasks are running: "
-                    + ", ".join(running),
+                if not force:
+                    raise ToolError(
+                        "workspace_busy",
+                        "cannot release controller ownership while tasks are running: "
+                        + ", ".join(running),
+                    )
+                assert reason is not None
+                forced_audit = {
+                    "project_id": project_id,
+                    "owner_id": owner_id,
+                    "running_task_ids": running,
+                    "reason": reason.strip(),
+                }
+                self.store.append_workspace_lease_audit(
+                    {"action": "forced_running_release_authorized", **forced_audit}
                 )
         try:
             self.store.release_workspace_lease(project_id, owner_id)
+        except ValueError as exc:
+            raise ToolError("invalid_owner", str(exc)) from exc
         except WorkspaceLeaseConflict as exc:
             raise ToolError("workspace_owned", str(exc)) from exc
+        if forced_audit is not None:
+            self.store.append_workspace_lease_audit(
+                {"action": "forced_running_release_completed", **forced_audit}
+            )
+
+    def recover_workspace_lease(
+        self, workspace_dir: str, owner_id: str, reason: str
+    ) -> WorkspaceLease:
+        try:
+            return self.store.recover_workspace_lease_for_workspace(
+                workspace_dir, owner_id, reason
+            )
+        except ValueError as exc:
+            code = "invalid_owner" if "owner_id" in str(exc) else "invalid_recovery"
+            raise ToolError(code, str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise ToolError("invalid_workspace", str(exc)) from exc
+        except WorkspaceLeaseConflict as exc:
+            raise ToolError("workspace_recovery_blocked", str(exc)) from exc
 
     def submit_plan(self, project_id: str, task_list: TaskList) -> Envelope:
         state = self._require_state(project_id)
@@ -238,7 +300,9 @@ class ProjectController:
     def inspect_project(self, project_id: str) -> Envelope:
         return self._build_envelope(project_id, dag_mode="full")
 
-    def abort_project(self, project_id: str, reason: str) -> Envelope:
+    def abort_project(
+        self, project_id: str, reason: str, owner_id: str | None = None
+    ) -> Envelope:
         record = self.store.load_project(project_id)
         state = self.store.load_state(project_id)
         mid = self._current_mission_id(record, state)
@@ -251,7 +315,10 @@ class ProjectController:
                 pass
         self.store.clear_attention(project_id)
         self.store.save_state(project_id, Aborted(reason=reason))
-        return self._build_envelope(project_id, dag_mode="none")
+        envelope = self._build_envelope(project_id, dag_mode="none")
+        if owner_id is not None:
+            self.release_project(project_id, owner_id)
+        return envelope
 
     # ------------------------------------------------------------------
     # Decision pipeline

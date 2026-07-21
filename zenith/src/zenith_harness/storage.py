@@ -126,11 +126,39 @@ class WorkspaceLease:
     workspace_dir: str
     claimed_at: str
     last_seen_at: str
+    host: str
+    pid: int
     path: Path
 
 
 class WorkspaceLeaseConflict(RuntimeError):
     """A different controller already owns the writable workspace."""
+
+
+_OWNER_ID_RE = re.compile(r"^[A-Za-z0-9._:@-]{1,200}$")
+
+
+def _normalize_owner_id(owner_id: str) -> str:
+    owner_id = owner_id.strip()
+    if not owner_id:
+        raise ValueError("owner_id is empty")
+    if len(owner_id) > 200:
+        raise ValueError("owner_id must be at most 200 characters")
+    if not _OWNER_ID_RE.fullmatch(owner_id):
+        raise ValueError("owner_id contains unsupported characters")
+    return owner_id
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -202,9 +230,7 @@ class ProjectStore:
         across MCP calls and processes until the owning controller explicitly
         releases it. Different workspaces remain independently claimable.
         """
-        owner_id = owner_id.strip()
-        if not owner_id:
-            raise ValueError("owner_id is empty")
+        owner_id = _normalize_owner_id(owner_id)
         requested_workspace = Path(workspace_dir).expanduser()
         if not requested_workspace.is_absolute():
             raise ValueError("workspace_dir must be absolute")
@@ -224,6 +250,23 @@ class ProjectStore:
                     lease_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
                 )
                 claimed_at = utc_now_iso()
+                claim_payload = {
+                    "schema_version": 1,
+                    "owner_id": owner_id,
+                    "project_id": project_id,
+                    "workspace_dir": str(workspace),
+                    "host": socket.gethostname(),
+                    "pid": os.getpid(),
+                    "claimed_at": claimed_at,
+                    "last_seen_at": claimed_at,
+                }
+                try:
+                    self._write_workspace_claim_record(lease_dir_fd, claim_payload)
+                except OSError:
+                    os.close(lease_dir_fd)
+                    lease_dir_fd = None
+                    shutil.rmtree(lease_dir, ignore_errors=True)
+                    raise
                 claimed = True
                 break
             except FileExistsError:
@@ -235,7 +278,29 @@ class ProjectStore:
                         if current is not None:
                             break
                 if current is None:
-                    if self._recover_incomplete_workspace_lease(lease_dir):
+                    incomplete_marker = self._load_workspace_lease_record(
+                        lease_dir / "claim.json"
+                    )
+                    if incomplete_marker is None:
+                        raise WorkspaceLeaseConflict(
+                            "workspace lease is incomplete and has no recoverable "
+                            f"claim identity: {lease_path}"
+                        )
+                    if incomplete_marker.host != socket.gethostname():
+                        raise WorkspaceLeaseConflict(
+                            "workspace lease has an incomplete claim on another "
+                            f"host ({incomplete_marker.host}): {lease_path}"
+                        )
+                    if _pid_is_alive(incomplete_marker.pid):
+                        raise WorkspaceLeaseConflict(
+                            "workspace has incomplete active claim by "
+                            f"owner={incomplete_marker.owner_id} "
+                            f"project={incomplete_marker.project_id} "
+                            f"pid={incomplete_marker.pid}; lease={lease_path}"
+                        )
+                    if self._recover_incomplete_workspace_lease(
+                        lease_dir, incomplete_marker
+                    ):
                         continue
                     continue
                 if (
@@ -247,6 +312,16 @@ class ProjectStore:
                         f"owner={current.owner_id} project={current.project_id}; "
                         f"requesting owner={owner_id} project={project_id}; "
                         f"lease={lease_path}"
+                    )
+                if current.host != socket.gethostname():
+                    raise WorkspaceLeaseConflict(
+                        "same owner id is active on another host "
+                        f"({current.host}); lease={lease_path}"
+                    )
+                if current.pid != os.getpid() and _pid_is_alive(current.pid):
+                    raise WorkspaceLeaseConflict(
+                        "same owner id is active in another controller process "
+                        f"pid={current.pid}; lease={lease_path}"
                     )
                 lease_dir_fd = os.open(
                     lease_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
@@ -285,10 +360,12 @@ class ProjectStore:
             "project_id": project_id,
             "workspace_dir": str(workspace),
             "host": socket.gethostname(),
+            "pid": os.getpid(),
             "claimed_at": claimed_at,
             "last_seen_at": now,
         }
         try:
+            self._write_workspace_claim_record(lease_dir_fd, payload)
             self._write_workspace_lease_record(lease_dir_fd, payload)
             opened_stat = os.fstat(lease_dir_fd)
             live_stat = lease_dir.stat()
@@ -313,6 +390,8 @@ class ProjectStore:
             workspace_dir=str(workspace),
             claimed_at=claimed_at,
             last_seen_at=now,
+            host=socket.gethostname(),
+            pid=os.getpid(),
             path=lease_path,
         )
 
@@ -327,6 +406,7 @@ class ProjectStore:
         project_id: str,
         owner_id: str,
     ) -> None:
+        owner_id = _normalize_owner_id(owner_id)
         lease_path = self._workspace_lease_path(workspace_dir)
         if not lease_path.parent.exists():
             return
@@ -353,7 +433,109 @@ class ProjectStore:
             ) from exc
         shutil.rmtree(released_dir)
 
-    def _recover_incomplete_workspace_lease(self, lease_dir: Path) -> bool:
+    def recover_workspace_lease_for_workspace(
+        self,
+        workspace_dir: str | Path,
+        requesting_owner_id: str,
+        reason: str,
+    ) -> WorkspaceLease:
+        """Release a lease only when its recorded same-host controller is dead."""
+        requesting_owner_id = _normalize_owner_id(requesting_owner_id)
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("recovery reason is empty")
+        if len(reason) > 500:
+            raise ValueError("recovery reason must be at most 500 characters")
+        requested_workspace = Path(workspace_dir).expanduser()
+        if not requested_workspace.is_absolute():
+            raise ValueError("workspace_dir must be absolute")
+        workspace = requested_workspace.resolve()
+        if not workspace.is_dir():
+            raise FileNotFoundError(f"workspace_dir does not exist: {workspace}")
+        lease_path = self._workspace_lease_path(workspace)
+        current = self._load_workspace_lease_record(lease_path)
+        if current is None:
+            current = self._load_workspace_lease_record(
+                lease_path.parent / "claim.json"
+            )
+        if current is None:
+            raise WorkspaceLeaseConflict(
+                f"workspace lease has no provable owner identity: {lease_path}"
+            )
+        if current.host != socket.gethostname():
+            raise WorkspaceLeaseConflict(
+                "cannot prove controller death on another host: "
+                f"{current.host}; lease={lease_path}"
+            )
+        if _pid_is_alive(current.pid):
+            raise WorkspaceLeaseConflict(
+                "cannot recover live workspace controller "
+                f"pid={current.pid}; lease={lease_path}"
+            )
+
+        recovery_audit = {
+            "workspace_dir": str(workspace),
+            "project_id": current.project_id,
+            "previous_owner_id": current.owner_id,
+            "previous_host": current.host,
+            "previous_pid": current.pid,
+            "requesting_owner_id": requesting_owner_id,
+            "reason": reason,
+        }
+        self.append_workspace_lease_audit(
+            {"action": "dead_controller_recovery_authorized", **recovery_audit}
+        )
+
+        quarantine = lease_path.parent.with_name(
+            f"{lease_path.parent.name}.recovering.{os.getpid()}.{time.time_ns()}"
+        )
+        try:
+            os.replace(lease_path.parent, quarantine)
+        except FileNotFoundError as exc:
+            raise WorkspaceLeaseConflict(
+                f"workspace lease changed during recovery: {lease_path}"
+            ) from exc
+        moved = self._load_workspace_lease_record(quarantine / "owner.json")
+        if moved is None:
+            moved = self._load_workspace_lease_record(quarantine / "claim.json")
+        if moved is None or self._lease_identity(moved) != self._lease_identity(current):
+            self._restore_quarantined_workspace_lease(quarantine, lease_path.parent)
+            raise WorkspaceLeaseConflict(
+                f"workspace lease changed during recovery: {lease_path}"
+            )
+        if moved.host != socket.gethostname() or _pid_is_alive(moved.pid):
+            self._restore_quarantined_workspace_lease(quarantine, lease_path.parent)
+            raise WorkspaceLeaseConflict(
+                f"workspace controller revived during recovery: {lease_path}"
+            )
+        self.append_workspace_lease_audit(
+            {"action": "dead_controller_recovery_completed", **recovery_audit}
+        )
+        shutil.rmtree(quarantine)
+        return moved
+
+    def append_workspace_lease_audit(self, payload: dict[str, object]) -> None:
+        audit_path = self.config.harness_home / "leases" / "recovery-log.jsonl"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        line = {
+            "schema_version": 1,
+            "recorded_at": utc_now_iso(),
+            **payload,
+        }
+        encoded = json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n"
+        fd = os.open(audit_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            remaining = memoryview(encoded.encode("utf-8"))
+            while remaining:
+                written = os.write(fd, remaining)
+                remaining = remaining[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def _recover_incomplete_workspace_lease(
+        self, lease_dir: Path, expected: WorkspaceLease
+    ) -> bool:
         """Fence and remove an ownerless claim directory after bounded polling."""
         quarantine = lease_dir.with_name(
             f"{lease_dir.name}.incomplete.{os.getpid()}.{time.time_ns()}"
@@ -378,15 +560,52 @@ class ProjectStore:
                 f"lease={lease_dir / 'owner.json'}"
             )
 
+        moved_marker = self._load_workspace_lease_record(
+            quarantine / "claim.json"
+        )
+        if (
+            moved_marker is None
+            or self._lease_identity(moved_marker) != self._lease_identity(expected)
+            or moved_marker.host != socket.gethostname()
+            or _pid_is_alive(moved_marker.pid)
+        ):
+            self._restore_quarantined_workspace_lease(quarantine, lease_dir)
+            raise WorkspaceLeaseConflict(
+                f"workspace incomplete claim changed during recovery: {lease_dir}"
+            )
+
         shutil.rmtree(quarantine)
         return True
 
     @staticmethod
+    def _lease_identity(lease: WorkspaceLease) -> tuple[str, str, str, int]:
+        return (lease.owner_id, lease.project_id, lease.host, lease.pid)
+
+    @staticmethod
+    def _restore_quarantined_workspace_lease(
+        quarantine: Path, lease_dir: Path
+    ) -> None:
+        try:
+            os.replace(quarantine, lease_dir)
+        except OSError as exc:
+            raise WorkspaceLeaseConflict(
+                f"workspace lease quarantine preserved at {quarantine}"
+            ) from exc
+
+    @staticmethod
+    def _write_workspace_claim_record(dir_fd: int, payload: object) -> None:
+        ProjectStore._write_workspace_json_record(dir_fd, "claim.json", payload)
+
+    @staticmethod
     def _write_workspace_lease_record(dir_fd: int, payload: object) -> None:
         """Publish one lease record within the exact directory inode claimed."""
-        temp_name = (
-            f"owner.json.tmp.{os.getpid()}.{time.time_ns()}.{id(payload)}"
-        )
+        ProjectStore._write_workspace_json_record(dir_fd, "owner.json", payload)
+
+    @staticmethod
+    def _write_workspace_json_record(
+        dir_fd: int, filename: str, payload: object
+    ) -> None:
+        temp_name = f"{filename}.tmp.{os.getpid()}.{time.time_ns()}.{id(payload)}"
         fd = os.open(
             temp_name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL,
@@ -401,7 +620,7 @@ class ProjectStore:
                 os.fsync(handle.fileno())
             os.replace(
                 temp_name,
-                "owner.json",
+                filename,
                 src_dir_fd=dir_fd,
                 dst_dir_fd=dir_fd,
             )
@@ -426,6 +645,8 @@ class ProjectStore:
                 workspace_dir=str(payload["workspace_dir"]),
                 claimed_at=str(payload["claimed_at"]),
                 last_seen_at=str(payload["last_seen_at"]),
+                host=str(payload.get("host", "")),
+                pid=int(payload.get("pid", 0)),
                 path=path,
             )
         except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -441,6 +662,8 @@ class ProjectStore:
                 workspace_dir=str(payload["workspace_dir"]),
                 claimed_at=str(payload["claimed_at"]),
                 last_seen_at=str(payload["last_seen_at"]),
+                host=str(payload.get("host", "")),
+                pid=int(payload.get("pid", 0)),
                 path=path,
             )
         except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):

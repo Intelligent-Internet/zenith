@@ -40,7 +40,7 @@ def create_orchestrator_server(
     config: HarnessConfig,
     controller: ProjectController | None = None,
 ) -> FastMCP:
-    """8 orchestrator tools, registered on a stdio MCP server."""
+    """9 orchestrator tools, registered on a stdio MCP server."""
     if controller is None:
         from .dispatcher import MockDispatcher, MockTerminalReviewer
 
@@ -56,9 +56,10 @@ def create_orchestrator_server(
         name="zenith",
         instructions=(
             "Mission orchestration harness. Mode: orchestrator. "
-            "8 tools: start_project, submit_plan, advance_project, "
+            "9 tools: start_project, submit_plan, advance_project, "
             "end_mission, decide_attention, inspect_project, abort_project. "
-            "release_project performs an explicit controller handoff. "
+            "release_project performs an explicit controller handoff; "
+            "recover_workspace_lease is a dead-controller recovery path. "
             "Lifecycle: plan with submit_plan, run with advance_project, "
             "request closure with end_mission, resolve attention with decide_attention, "
             "then call advance_project again."
@@ -126,8 +127,9 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
     def _controller_owner(_ctx: Context | None) -> str:
         if explicit_owner:
             return explicit_owner
-        # FastMCP session ids are scoped to one server and can repeat across
-        # processes. The server UUID is globally distinct for the fallback path.
+        # Existing init configs do not inject a dynamic task id. A process-unique
+        # fallback still provides exclusive ownership; the PID-bound recovery tool
+        # makes a crashed fallback owner safely recoverable.
         return server_instance_owner
 
     def _claim(project_id: str, owner_id: str) -> None:
@@ -319,7 +321,9 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
                 owner_id = _controller_owner(ctx)
                 await asyncio.to_thread(_claim, project_id, owner_id)
                 return _to_payload(
-                    await asyncio.to_thread(controller.abort_project, project_id, reason)
+                    await asyncio.to_thread(
+                        controller.abort_project, project_id, reason, owner_id
+                    )
                 )
             except ToolError as exc:
                 return _to_payload(exc)
@@ -334,18 +338,70 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
     )
     async def release_project(
         project_id: Annotated[str, Field(description="Project id.")],
+        force: Annotated[
+            bool,
+            Field(
+                default=False,
+                description="Allow release with stuck running task records.",
+            ),
+        ] = False,
+        reason: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description="Required audit reason when force is true.",
+            ),
+        ] = None,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         async with await _project_lock(project_id):
             try:
                 owner_id = _controller_owner(ctx)
                 await asyncio.to_thread(
-                    controller.release_project, project_id, owner_id
+                    controller.release_project,
+                    project_id,
+                    owner_id,
+                    force=force,
+                    reason=reason,
                 )
                 return {
                     "released": True,
                     "projectId": project_id,
-                    "ownerId": owner_id,
+                    "forced": force,
+                }
+            except ToolError as exc:
+                return _to_payload(exc)
+
+    @mcp.tool(
+        name="recover_workspace_lease",
+        description=(
+            "Break a stale workspace lease only when the recorded controller PID "
+            "is provably dead on this host. Requires an audit reason. Use after a "
+            "controller crash, including before a project record was created."
+        ),
+    )
+    async def recover_workspace_lease(
+        workspace_dir: Annotated[
+            str, Field(description="Existing absolute workspace path.")
+        ],
+        reason: Annotated[
+            str, Field(description="Why dead-controller recovery is required.")
+        ],
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        async with await _project_lock(f"workspace:{workspace_dir}"):
+            try:
+                owner_id = _controller_owner(ctx)
+                recovered = await asyncio.to_thread(
+                    controller.recover_workspace_lease,
+                    workspace_dir,
+                    owner_id,
+                    reason,
+                )
+                return {
+                    "recovered": True,
+                    "workspaceDir": recovered.workspace_dir,
+                    "previousProjectId": recovered.project_id,
                 }
             except ToolError as exc:
                 return _to_payload(exc)
