@@ -168,18 +168,44 @@ class HarnessConfig:
 
     @property
     def resolved_validator_acp_command(self) -> str | None:
+        """Explicit override, else inherit; provider default only on a
+        provider switch.
+
+        Mirrors `ProviderSelection.resolved_validation_worker_acp_command`
+        (providers.py): a custom worker command must cascade to a validator
+        on the *same* provider. The provider default is a fallback for a
+        *different* validator provider, not a shadow over the inherited
+        command — `default_worker_acp_command` is always truthy, so putting
+        it ahead of inheritance in a plain or-chain silently discards the
+        user's custom command (model flags, wrapper scripts, mocks).
+        """
+        if self.validator_acp_command:
+            return self.validator_acp_command
+        if self.validator_provider.name != self.worker_provider.name:
+            return (
+                self.validator_provider.default_worker_acp_command
+                or self.resolved_worker_acp_command
+            )
         return (
-            self.validator_acp_command
+            self.resolved_worker_acp_command
             or self.validator_provider.default_worker_acp_command
-            or self.resolved_worker_acp_command
         )
 
     @property
     def resolved_terminal_reviewer_acp_command(self) -> str | None:
+        """Same cascade as the validator, one level up: inherit the
+        validator's resolved command unless the reviewer switches provider.
+        """
+        if self.terminal_reviewer_acp_command:
+            return self.terminal_reviewer_acp_command
+        if self.terminal_reviewer_provider.name != self.validator_provider.name:
+            return (
+                self.terminal_reviewer_provider.default_worker_acp_command
+                or self.resolved_validator_acp_command
+            )
         return (
-            self.terminal_reviewer_acp_command
+            self.resolved_validator_acp_command
             or self.terminal_reviewer_provider.default_worker_acp_command
-            or self.resolved_validator_acp_command
         )
 
     @property
