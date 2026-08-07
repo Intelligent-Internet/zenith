@@ -118,6 +118,44 @@ def _augment_acp_command(
     return command
 
 
+def _terminal_reviewer_session_meta(provider) -> dict[str, Any] | None:
+    """Session `_meta` isolating the terminal reviewer from ambient context.
+
+    The terminal reviewer's system prompt declares the user request and the
+    workspace as its only inputs and forbids reading provider skill
+    directories. But `claude-agent-acp` defaults to
+    `settingSources: ["user", "project", "local"]` and leaves the SDK's
+    skill discovery on, so the user's global CLAUDE.md, settings.json, and
+    skill listings are injected into the reviewer's context before it reads
+    a single instruction — sources its own prompt forbids.
+
+    `_meta.claudeCode.options` is the adapter's documented pass-through
+    (`NewSessionMeta`); `settingSources`/`skills` are forwarded to the
+    Claude Agent SDK verbatim. Older adapters without the pass-through
+    ignore `_meta` — graceful degradation to current behavior.
+
+    Deliberately terminal-reviewer-only: workers and validators keep
+    ambient context, since global rules files are how users enforce
+    cross-project conventions. Independence is this role's requirement.
+    """
+    if getattr(provider, "name", None) != "claude":
+        return None
+    return {
+        "claudeCode": {
+            "options": {
+                # No user/project/local settings.json or CLAUDE.md. The
+                # adapter's own SettingsManager (permission mode, model
+                # resolution) reads settings unconditionally, so the
+                # _ensure_claude_settings workaround is unaffected.
+                "settingSources": [],
+                # Context filter, not a sandbox: skill files stay readable
+                # via Read/Bash, but the prompt already forbids that.
+                "skills": [],
+            }
+        }
+    }
+
+
 def _acp_subprocess_env(provider) -> dict[str, str]:
     """Build the env handed to an ACP-agent subprocess.
 
@@ -828,6 +866,9 @@ class ACPNodeRunner:
                 "mcpServers": [worker_mcp_cfg],
             }
             provider = role_config.worker_provider
+            session_meta = _terminal_reviewer_session_meta(provider)
+            if session_meta is not None:
+                session_params["_meta"] = session_meta
             session_resp = await client.send_request("session/new", session_params)
             session_id = session_resp["sessionId"]
             await self._maybe_set_mode(client, session_id, provider)

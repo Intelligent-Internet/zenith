@@ -14,7 +14,8 @@ Handles:
 Environment variables read from os.environ:
   ZENITH_HANDOFF_PATH  — where to write the synthesized handoff file
   ZENITH_NODE_ID       — node id to embed in handoff
-  ZENITH_NODE_TYPE     — work | validate (controls the handoff shape)
+  ZENITH_NODE_TYPE     — work | validate | terminal_review (handoff shape)
+  MOCK_ACP_SESSION_PARAMS_PATH — if set, dump session/new params here (JSON)
   ZENITH_VALIDATION_PASSED — '1' to mark items passed=true (validate only)
   MOCK_ACP_CRASH       — '1' to exit immediately without writing
   MOCK_ACP_REQUEST_ATTENTION — '1' to set request_attention=true
@@ -37,7 +38,12 @@ def _write_handoff() -> None:
     node_type = os.environ.get("ZENITH_NODE_TYPE", "work")
     done = os.environ.get("MOCK_ACP_DONE", "1") != "0"
     request_attention = os.environ.get("MOCK_ACP_REQUEST_ATTENTION") == "1"
-    if node_type == "validate":
+    if node_type == "terminal_review":
+        payload = {
+            "done": done,
+            "report": "mock terminal review",
+        }
+    elif node_type == "validate":
         passed = os.environ.get("ZENITH_VALIDATION_PASSED", "1") != "0"
         payload = {
             "node_id": node_id,
@@ -96,6 +102,11 @@ def main() -> None:
                 "authMethods": [],
             })
         elif method == "session/new":
+            params_path = os.environ.get("MOCK_ACP_SESSION_PARAMS_PATH")
+            if params_path:
+                Path(params_path).write_text(
+                    json.dumps(msg.get("params", {}), indent=2), encoding="utf-8"
+                )
             resp = _response(req_id, {"sessionId": "mock-session-1"})
         elif method == "session/set_mode":
             resp = _response(req_id, {})
