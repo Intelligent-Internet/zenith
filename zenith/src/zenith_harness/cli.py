@@ -103,7 +103,14 @@ def init(
     workspace stays clean of `.zenith/` until `start_project` runs.
     """
     workspace = Path(workspace_dir).resolve()
-    config = HarnessConfig.discover()
+    # discover() validates the ambient ZENITH_* settings. Its ValueError is a
+    # user-facing complaint about the caller's environment, not a harness
+    # fault, so it gets the same treatment as a bad flag rather than a
+    # traceback.
+    try:
+        config = HarnessConfig.discover()
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from None
     loader = AssetLoader(config)
     selection = _resolve_selection(
         agent=agent,
@@ -132,17 +139,180 @@ def init(
         )
         if value
     }
-    _write_bootstrap_config(workspace, selection, storage_env, effort_env)
+    # Resolve every role the way the server will, then stage what was
+    # resolved. These vars are not in RUNTIME_ENV_FORWARD_ALLOWLIST and
+    # ProviderSelection.env() emits a role provider only when it differs from
+    # the worker, so an ambient ZENITH_VALIDATOR_PROVIDER used to inform init's
+    # diagnostics while never reaching the config init wrote. The two answers
+    # could then disagree in both directions: a warning about a hermes
+    # validator whose written config said claude, and silence in the mirror
+    # case. Writing the resolved value closes that gap — the host agent is
+    # usually launched later, from a different shell, and reads only what is
+    # written here.
+    #
+    # Precedence per role: explicit flag, then the ambient var, then inherit
+    # down the chain (worker -> validator -> terminal reviewer). The flag wins
+    # so an explicit `--validator-provider claude` is never overruled by a
+    # stale export.
+    def _ambient(var: str) -> str | None:
+        return os.environ.get(var) or None
 
-    # 2) Per-provider agents + orchestrator prompt
-    for provider in selection.providers():
+    def _pick(*candidates: tuple[str | None, str]) -> tuple[str, str]:
+        """First candidate with a value, paired with where it came from."""
+        for value, source in candidates:
+            if value:
+                return value, source
+        raise AssertionError("the final candidate must always carry a value")
+
+    # The worker is the exception: it is the only role with a default of its
+    # own (`--agent`, then default_worker_provider_name), and ProviderSelection
+    # has always written ZENITH_WORKER_PROVIDER unconditionally. Init therefore
+    # sets the worker rather than inheriting it, and an ambient
+    # ZENITH_WORKER_PROVIDER does not survive `zenith init`. The other two
+    # roles have no default but the lane above them, which is why they consult
+    # the environment.
+    worker_provider_name, worker_source = selection.worker.name, "--worker-provider"
+    validator_provider_name, validator_source = _pick(
+        (validator_provider, "--validator-provider"),
+        (_ambient("ZENITH_VALIDATOR_PROVIDER"), "ZENITH_VALIDATOR_PROVIDER"),
+        (worker_provider_name, worker_source),
+    )
+    terminal_reviewer_provider_name, terminal_source = _pick(
+        (terminal_reviewer_provider, "--terminal-reviewer-provider"),
+        (_ambient("ZENITH_TERMINAL_REVIEWER_PROVIDER"), "ZENITH_TERMINAL_REVIEWER_PROVIDER"),
+        (validator_provider_name, validator_source),
+    )
+
+    # An ACP command names a binary, so it is the most provider-specific value
+    # in the config. It is therefore taken from the
+    # environment only for a lane whose *provider* also came from the
+    # environment, so the pair stays together. Take one without the other and
+    # init manufactures the mismatch it warns about below: with
+    # `ZENITH_WORKER_PROVIDER=codex ZENITH_WORKER_ACP_COMMAND=codex-acp` in the
+    # shell, `zenith init --agent claude` sets the worker provider itself (see
+    # above) and would otherwise pair claude with codex-acp — permanently, and
+    # in the config it just wrote. A lane whose provider init chose gets its
+    # command from the flag or from that provider's default, never from a
+    # shell that was talking about some other provider.
+    #
+    # Honoring the paired case still fixes the original defect: an exported
+    # ZENITH_VALIDATOR_ACP_COMMAND used to inform nothing and never be written,
+    # so the lane silently fell back to the worker's command at runtime.
+    def _role_command(
+        flag_value: str | None, var: str, provider_source: str
+    ) -> str | None:
+        if flag_value:
+            return flag_value
+        return _ambient(var) if provider_source == var.replace("_ACP_COMMAND", "_PROVIDER") else None
+
+    role_command = {
+        var: value
+        for var, value in (
+            (
+                "ZENITH_WORKER_ACP_COMMAND",
+                _role_command(worker_acp_command, "ZENITH_WORKER_ACP_COMMAND", worker_source),
+            ),
+            (
+                "ZENITH_VALIDATOR_ACP_COMMAND",
+                _role_command(
+                    validator_acp_command, "ZENITH_VALIDATOR_ACP_COMMAND", validator_source
+                ),
+            ),
+            (
+                "ZENITH_TERMINAL_REVIEWER_ACP_COMMAND",
+                _role_command(
+                    terminal_reviewer_acp_command,
+                    "ZENITH_TERMINAL_REVIEWER_ACP_COMMAND",
+                    terminal_source,
+                ),
+            ),
+        )
+        if value
+    }
+    role_env = {
+        "ZENITH_VALIDATOR_PROVIDER": validator_provider_name,
+        "ZENITH_TERMINAL_REVIEWER_PROVIDER": terminal_reviewer_provider_name,
+        **role_command,
+    }
+    cli_env = {**effort_env, **role_env}
+
+    # Resolved before anything is written: the flags carry a click.Choice, but
+    # an ambient ZENITH_*_PROVIDER does not, and these names are dereferenced
+    # late — the terminal one at asset install, the validator one not until the
+    # first validate dispatch mid-mission. A typo should stop init, blamed on
+    # whatever actually supplied it. A flag that beat the ambient var means the
+    # ambient typo never reaches this check, which is the point.
+    def _resolve_provider(name: str, source: str):
+        try:
+            return get_provider(name)
+        except ValueError as exc:
+            raise click.UsageError(f"{exc} (from {source})") from None
+
+    validator_provider_def = _resolve_provider(validator_provider_name, validator_source)
+    terminal_reviewer_provider_def = _resolve_provider(
+        terminal_reviewer_provider_name, terminal_source
+    )
+
+    def _runs_provider_binary(command: str, provider_def: ProviderDefinition) -> bool:
+        """Whether `command` looks like it launches `provider_def`'s own agent.
+
+        Compares the executable — first token, basename only — so an absolute
+        path or added arguments (`/usr/local/bin/codex-acp`, `codex-acp
+        --verbose`) still reads as codex. Wrong only when a command genuinely
+        runs a different binary, which is the case worth a warning.
+        """
+        default = provider_def.default_worker_acp_command
+        if not default:
+            return False
+        return Path(command.split()[0]).name == Path(default.split()[0]).name
+
+    # A lane whose command runs somebody else's binary will not get the
+    # provider-specific treatment the harness applies for the provider it
+    # thinks it has: sandbox flags, the codex config flags and the ACP session
+    # mode all key on provider.name.
+    for role, provider_def, command_var in (
+        ("worker", selection.worker, "ZENITH_WORKER_ACP_COMMAND"),
+        ("validator", validator_provider_def, "ZENITH_VALIDATOR_ACP_COMMAND"),
+        (
+            "terminal reviewer",
+            terminal_reviewer_provider_def,
+            "ZENITH_TERMINAL_REVIEWER_ACP_COMMAND",
+        ),
+    ):
+        command = role_command.get(command_var)
+        if command and not _runs_provider_binary(command, provider_def):
+            click.echo(
+                f"Warning: the {role} lane dispatches as provider "
+                f"{provider_def.name} but launches {command} — sandbox flags "
+                "and the ACP session mode are applied the way "
+                f"{provider_def.name} expects, and will be wrong if that "
+                "command runs a different agent."
+            )
+
+    _write_bootstrap_config(workspace, selection, storage_env, cli_env)
+
+    # 2) Per-provider agents + orchestrator prompt. ProviderSelection knows
+    #    only the flags, so both roles that can be resolved from the
+    #    environment are added here. Skipping either installs a workspace whose
+    #    config names a provider that has no agents or skills on disk — a
+    #    validator resolved from an ambient ZENITH_VALIDATOR_PROVIDER used to
+    #    get assets only by accident, when the reviewer happened to inherit it.
+    asset_providers = list(selection.providers())
+    for provider_def in (validator_provider_def, terminal_reviewer_provider_def):
+        if provider_def.name not in {p.name for p in asset_providers}:
+            asset_providers.append(provider_def)
+    for provider in asset_providers:
         _setup_provider_assets(workspace, loader, provider)
 
     click.echo(
         f"\nInitialized v5 project workspace at {workspace}: "
         f"orchestrator={selection.orchestrator.name}, "
-        f"worker={selection.worker.name}, "
-        f"validator={selection.resolved_validation_worker.name}."
+        f"worker={worker_provider_name}, "
+        # The resolved names, not selection's flag-only view — otherwise the
+        # summary contradicts the config written one line earlier whenever a
+        # role came from the environment.
+        f"validator={validator_provider_name}, "
+        f"terminal-reviewer={terminal_reviewer_provider_name}."
     )
     click.echo(
         "Bucket lives at $ZENITH_HOME/projects/<pid>/ — created on the first "
