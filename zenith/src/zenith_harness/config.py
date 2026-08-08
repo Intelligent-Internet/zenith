@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
@@ -21,6 +22,15 @@ DEFAULT_MAX_PARALLEL_NODES = 4
 # multi-agent mode — a lane spawning its own agent swarm inside a harness
 # that already orchestrates and validates per-lane work.
 VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
+
+# Model identifiers are open-ended (provider aliases like "opus", pinned ids
+# like "claude-opus-5[1m]", Bedrock/Vertex ARNs), so they cannot be checked
+# against an allowlist the way reasoning efforts are. They still reach a shell
+# command line for codex (`-c model="..."`), so the character set is restricted
+# to what real model identifiers use — no quotes, spaces, or shell operators.
+# Matched with fullmatch: `$` would admit a trailing newline, which survives
+# into .codex/config.toml as an unescaped newline inside a basic string.
+MODEL_ID_PATTERN = re.compile(r"[A-Za-z0-9._:/@\[\]-]+")
 
 
 def _bundled_dir() -> Path:
@@ -57,6 +67,20 @@ def _resolve_reasoning_effort(value: str | None, *, env_var: str) -> str | None:
     return value
 
 
+def validate_model_id(value: str | None, *, env_var: str) -> str | None:
+    """None passes through (provider default); anything else must look like a
+    model identifier. The value is spliced into a shell command line for codex,
+    so a rejected string is a refusal to execute, not a cosmetic complaint."""
+    if not value:
+        return None
+    if not MODEL_ID_PATTERN.fullmatch(value):
+        raise ValueError(
+            f"{env_var}={value!r} is not a valid model identifier; "
+            "allowed characters are letters, digits, and ._:/@[]-"
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class HarnessConfig:
     """Static configuration loaded from env. Per-call overrides allowed via `with_*`."""
@@ -77,6 +101,16 @@ class HarnessConfig:
     worker_reasoning_effort: str | None = None
     validator_reasoning_effort: str | None = None
     terminal_reviewer_reasoning_effort: str | None = None
+    # Per-role model pin. None means whatever the lane would run without one:
+    # codex uses the model in its own config, and claude-agent-acp reads an
+    # inherited ANTHROPIC_MODEL if the environment carries one (that var is in
+    # the CLI's runtime forward allowlist, so a workspace can carry it) before
+    # falling back to its first model. So an unpinned claude lane is not
+    # guaranteed to be on a provider default — including when `_inherited_model`
+    # declines to inherit a foreign-provider pin.
+    worker_model: str | None = None
+    validator_model: str | None = None
+    terminal_reviewer_model: str | None = None
 
     @classmethod
     def discover(cls) -> HarnessConfig:
@@ -134,6 +168,18 @@ class HarnessConfig:
             terminal_reviewer_reasoning_effort=_resolve_reasoning_effort(
                 os.environ.get("ZENITH_TERMINAL_REVIEWER_REASONING_EFFORT"),
                 env_var="ZENITH_TERMINAL_REVIEWER_REASONING_EFFORT",
+            ),
+            worker_model=validate_model_id(
+                os.environ.get("ZENITH_WORKER_MODEL"),
+                env_var="ZENITH_WORKER_MODEL",
+            ),
+            validator_model=validate_model_id(
+                os.environ.get("ZENITH_VALIDATOR_MODEL"),
+                env_var="ZENITH_VALIDATOR_MODEL",
+            ),
+            terminal_reviewer_model=validate_model_id(
+                os.environ.get("ZENITH_TERMINAL_REVIEWER_MODEL"),
+                env_var="ZENITH_TERMINAL_REVIEWER_MODEL",
             ),
         )
 
@@ -224,35 +270,71 @@ class HarnessConfig:
     # Role-specialized variants
     # ------------------------------------------------------------------
 
+    def _inherited_model(
+        self, provider_name: str, chain: tuple[tuple[str | None, str], ...]
+    ) -> str | None:
+        """Walk a role's fallback chain, skipping links from other providers.
+
+        Reasoning efforts are provider-neutral vocabulary, so they inherit
+        freely. Model ids are not — a codex worker's "gpt-5.5" handed to a
+        claude validator becomes ANTHROPIC_MODEL="gpt-5.5" and breaks every
+        session on that lane. So a pin only carries to a role running the same
+        provider; otherwise the role falls back to its provider's own default.
+
+        `chain` is ordered nearest-first: (pin, provider that pin was set for).
+        """
+        for pin, pin_provider_name in chain:
+            if pin and pin_provider_name == provider_name:
+                return pin
+        return None
+
     def for_role(
         self, role: Literal["worker", "validator", "terminal_reviewer"]
     ) -> HarnessConfig:
         if role == "worker":
             return self
         if role == "validator":
+            provider_name = self.validator_provider_name or self.worker_provider_name
             return replace(
                 self,
-                worker_provider_name=(
-                    self.validator_provider_name or self.worker_provider_name
-                ),
+                worker_provider_name=provider_name,
                 worker_acp_command=self.resolved_validator_acp_command,
                 worker_reasoning_effort=(
                     self.validator_reasoning_effort or self.worker_reasoning_effort
                 ),
+                worker_model=self._inherited_model(
+                    provider_name,
+                    (
+                        (self.validator_model, provider_name),
+                        (self.worker_model, self.worker_provider_name),
+                    ),
+                ),
             )
         if role == "terminal_reviewer":
+            validator_provider_name = (
+                self.validator_provider_name or self.worker_provider_name
+            )
+            provider_name = (
+                self.terminal_reviewer_provider_name
+                or self.validator_provider_name
+                or self.worker_provider_name
+            )
             return replace(
                 self,
-                worker_provider_name=(
-                    self.terminal_reviewer_provider_name
-                    or self.validator_provider_name
-                    or self.worker_provider_name
-                ),
+                worker_provider_name=provider_name,
                 worker_acp_command=self.resolved_terminal_reviewer_acp_command,
                 worker_reasoning_effort=(
                     self.terminal_reviewer_reasoning_effort
                     or self.validator_reasoning_effort
                     or self.worker_reasoning_effort
+                ),
+                worker_model=self._inherited_model(
+                    provider_name,
+                    (
+                        (self.terminal_reviewer_model, provider_name),
+                        (self.validator_model, validator_provider_name),
+                        (self.worker_model, self.worker_provider_name),
+                    ),
                 ),
             )
         raise ValueError(f"unknown role: {role}")

@@ -8,7 +8,7 @@ from pathlib import Path
 import click
 
 from .assets import AssetLoader, iter_skill_directories
-from .config import VALID_REASONING_EFFORTS, HarnessConfig
+from .config import VALID_REASONING_EFFORTS, HarnessConfig, validate_model_id
 from .envelope import render_task_list
 from .providers import (
     ProviderDefinition,
@@ -37,9 +37,38 @@ RUNTIME_ENV_FORWARD_ALLOWLIST = (
     "ZENITH_WORKER_REASONING_EFFORT",
     "ZENITH_VALIDATOR_REASONING_EFFORT",
     "ZENITH_TERMINAL_REVIEWER_REASONING_EFFORT",
+    # Deliberately absent: ZENITH_{WORKER,VALIDATOR,TERMINAL_REVIEWER}_MODEL.
+    # See the model_env comment in `init` — an ambient model pin carries no
+    # record of the provider it was chosen for, so forwarding it into a
+    # workspace config lands it on whatever provider that workspace uses.
     "ZAI_API_KEY",
     "ZAI_BASE_URL",
 )
+
+
+def _validate_model_flag(ctx, param, value):
+    """Click callback for the --*-model flags.
+
+    The env vars are validated at `discover()`; flags need the same check but
+    reported as a usage error against the option the user actually typed. An
+    explicit empty string is rejected rather than dropped, because it reads as
+    "run this lane unpinned" and does not do that: a same-provider lane still
+    inherits the pin above it, and there is no flag that expresses "unpinned".
+    Refusing is honest; silently accepting a no-op would not be.
+    """
+    if value is None:
+        return None
+    if not value:
+        raise click.BadParameter("model pin cannot be empty", ctx=ctx, param=param)
+    try:
+        return validate_model_id(value, env_var=param.name)
+    except ValueError:
+        raise click.BadParameter(
+            f"{value!r} is not a valid model identifier; "
+            "allowed characters are letters, digits, and ._:/@[]-",
+            ctx=ctx,
+            param=param,
+        ) from None
 
 
 @click.group()
@@ -77,6 +106,12 @@ def cli() -> None:
 @click.option("--worker-reasoning-effort", type=click.Choice(VALID_REASONING_EFFORTS), default=None)
 @click.option("--validator-reasoning-effort", type=click.Choice(VALID_REASONING_EFFORTS), default=None)
 @click.option("--terminal-reviewer-reasoning-effort", type=click.Choice(VALID_REASONING_EFFORTS), default=None)
+@click.option("--worker-model", default=None, callback=_validate_model_flag,
+              help="Model pin for worker lanes (e.g. opus, gpt-5.5).")
+@click.option("--validator-model", default=None, callback=_validate_model_flag,
+              help="Model pin for the validation gate; falls back to the worker pin.")
+@click.option("--terminal-reviewer-model", default=None, callback=_validate_model_flag,
+              help="Model pin for terminal review; falls back to the validator pin.")
 @click.option("--zenith-home", type=click.Path(), default=None)
 @click.option("--workspace-dir", "workspace_dir", type=click.Path(exists=True), default=".")
 def init(
@@ -91,6 +126,9 @@ def init(
     worker_reasoning_effort: str | None,
     validator_reasoning_effort: str | None,
     terminal_reviewer_reasoning_effort: str | None,
+    worker_model: str | None,
+    validator_model: str | None,
+    terminal_reviewer_model: str | None,
     zenith_home: str | None,
     workspace_dir: str,
 ) -> None:
@@ -107,10 +145,29 @@ def init(
     # user-facing complaint about the caller's environment, not a harness
     # fault, so it gets the same treatment as a bad flag rather than a
     # traceback.
+    #
+    # A model pin that a flag replaces is exempt. Ambient pins are never
+    # written (see model_env below), so a broken one still deserves to stop
+    # init — it would reach a server launched from this same shell. But once a
+    # flag supplies that role's pin, the written config overrides the ambient
+    # value for every server this workspace starts, and failing on it would
+    # block an init that already ignores it. Restored immediately: the
+    # environment belongs to the caller.
+    shadowed = {
+        var: os.environ.pop(var)
+        for var, flag_value in (
+            ("ZENITH_WORKER_MODEL", worker_model),
+            ("ZENITH_VALIDATOR_MODEL", validator_model),
+            ("ZENITH_TERMINAL_REVIEWER_MODEL", terminal_reviewer_model),
+        )
+        if flag_value and var in os.environ
+    }
     try:
         config = HarnessConfig.discover()
     except ValueError as exc:
         raise click.UsageError(str(exc)) from None
+    finally:
+        os.environ.update(shadowed)
     loader = AssetLoader(config)
     selection = _resolve_selection(
         agent=agent,
@@ -136,6 +193,37 @@ def init(
             ("ZENITH_WORKER_REASONING_EFFORT", worker_reasoning_effort),
             ("ZENITH_VALIDATOR_REASONING_EFFORT", validator_reasoning_effort),
             ("ZENITH_TERMINAL_REVIEWER_REASONING_EFFORT", terminal_reviewer_reasoning_effort),
+        )
+        if value
+    }
+    # Model pins take the flags but NOT the ambient env, which is where they
+    # part company with the reasoning efforts above. An effort is
+    # provider-neutral vocabulary, so forwarding an inherited one into the
+    # workspace is safe. A model id is not: an ambient ZENITH_WORKER_MODEL
+    # arrives with no record of which provider it was chosen for, so baking it
+    # into this workspace lands a leftover `gpt-5.5-codex` on a claude lane as
+    # ANTHROPIC_MODEL — the exact cross-provider landing `_inherited_model`
+    # refuses to make inside a single config. Pins therefore enter a workspace
+    # only through the flags, checked below against the provider resolved for
+    # that lane. An ambient ZENITH_*_MODEL still reaches a server the user
+    # launches from that same shell; init just does not make it durable.
+    #
+    # ANTHROPIC_MODEL is the exception, and it is deliberate: it is a
+    # provider-scoped variable rather than a lane-scoped one, it is the
+    # documented way to pin claude globally, and it stays in the forward
+    # allowlist above. So a workspace inited from a shell that exported it does
+    # carry it, and an "unpinned" claude lane runs on it — see the note on
+    # HarnessConfig.worker_model.
+    #
+    # Click has no Choice to validate an open-ended model id against, so the
+    # flags carry _validate_model_flag, which applies the same check discover()
+    # applies to the env vars.
+    model_env = {
+        var: value
+        for var, value in (
+            ("ZENITH_WORKER_MODEL", worker_model),
+            ("ZENITH_VALIDATOR_MODEL", validator_model),
+            ("ZENITH_TERMINAL_REVIEWER_MODEL", terminal_reviewer_model),
         )
         if value
     }
@@ -184,7 +272,7 @@ def init(
     )
 
     # An ACP command names a binary, so it is the most provider-specific value
-    # in the config. It is therefore taken from the
+    # in the config — more so than a model id. It is therefore taken from the
     # environment only for a lane whose *provider* also came from the
     # environment, so the pair stays together. Take one without the other and
     # init manufactures the mismatch it warns about below: with
@@ -234,7 +322,7 @@ def init(
         "ZENITH_TERMINAL_REVIEWER_PROVIDER": terminal_reviewer_provider_name,
         **role_command,
     }
-    cli_env = {**effort_env, **role_env}
+    cli_env = {**effort_env, **model_env, **role_env}
 
     # Resolved before anything is written: the flags carry a click.Choice, but
     # an ambient ZENITH_*_PROVIDER does not, and these names are dereferenced
@@ -266,25 +354,42 @@ def init(
             return False
         return Path(command.split()[0]).name == Path(default.split()[0]).name
 
-    # A lane whose command runs somebody else's binary will not get the
-    # provider-specific treatment the harness applies for the provider it
-    # thinks it has: sandbox flags, the codex config flags and the ACP session
-    # mode all key on provider.name.
-    for role, provider_def, command_var in (
-        ("worker", selection.worker, "ZENITH_WORKER_ACP_COMMAND"),
-        ("validator", validator_provider_def, "ZENITH_VALIDATOR_ACP_COMMAND"),
+    # Two independent hazards, reported independently: a hermes lane cannot act
+    # on a pin at all, and a lane whose command runs somebody else's binary
+    # will not get the provider-specific treatment the harness applies for the
+    # provider it thinks it has. The command hazard is NOT conditioned on a
+    # pin — dispatch keys on provider.name for sandbox flags, the codex config
+    # flags and the ACP session mode too, so it is a hazard on its own.
+    for role, flag, pin, provider_def, command_var in (
+        ("worker", "--worker-model", worker_model, selection.worker, "ZENITH_WORKER_ACP_COMMAND"),
+        (
+            "validator",
+            "--validator-model",
+            validator_model,
+            validator_provider_def,
+            "ZENITH_VALIDATOR_ACP_COMMAND",
+        ),
         (
             "terminal reviewer",
+            "--terminal-reviewer-model",
+            terminal_reviewer_model,
             terminal_reviewer_provider_def,
             "ZENITH_TERMINAL_REVIEWER_ACP_COMMAND",
         ),
     ):
+        # The pins come from the flags only (see model_env), so the flag name
+        # is always the right thing to name here.
+        if pin and provider_def.name == "hermes":
+            click.echo(
+                f"Warning: {flag} is ignored for provider {provider_def.name} — "
+                "it exposes no model selection."
+            )
         command = role_command.get(command_var)
         if command and not _runs_provider_binary(command, provider_def):
             click.echo(
                 f"Warning: the {role} lane dispatches as provider "
-                f"{provider_def.name} but launches {command} — sandbox flags "
-                "and the ACP session mode are applied the way "
+                f"{provider_def.name} but launches {command} — sandbox flags, "
+                "model pins and the ACP session mode are all applied the way "
                 f"{provider_def.name} expects, and will be wrong if that "
                 "command runs a different agent."
             )

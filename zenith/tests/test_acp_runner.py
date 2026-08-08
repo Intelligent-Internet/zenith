@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -124,6 +125,176 @@ def test_run_node_with_mock_agent(
     assert data["node_id"] == "w1"
 
 
+class _SpawnCaptured(Exception):
+    """Raised by the spy to stop the runner once the launch args are known."""
+
+    def __init__(self, command: str, env: dict[str, str]):
+        super().__init__("captured")
+        self.command = command
+        self.env = env
+
+
+def _capture_acp_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Intercept the ACP agent launch and surface its command line + env.
+
+    The helper tests below call `_augment_acp_command`/`_acp_subprocess_env`
+    directly, which cannot catch an un-threaded call site — drop
+    `role_config.worker_model` from run_node and they all still pass. This
+    spies on the real `create_subprocess_shell` the runner uses, so the
+    assertions fail if the pin never reaches the launch.
+    """
+
+    async def _spy(command, *args, **kwargs):
+        raise _SpawnCaptured(command, kwargs.get("env") or {})
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", _spy)
+
+
+def _run_node_capturing_spawn(
+    config: HarnessConfig, store, task: Task
+) -> _SpawnCaptured:
+    runner = ACPNodeRunner(config=config, loader=AssetLoader(config))
+
+    async def _no_op_server(*args, **kwargs):
+        return None
+
+    async def _ready_immediately(*args, **kwargs):
+        return None
+
+    runner._start_worker_mcp_server = _no_op_server  # type: ignore[method-assign]
+    runner._wait_for_server_ready = _ready_immediately  # type: ignore[method-assign]
+
+    with pytest.raises(_SpawnCaptured) as excinfo:
+        asyncio.run(
+            runner.run_node(
+                project_id="p1",
+                mission_id="mission-001",
+                task=task,
+                spawn_ts="2026-05-17T00-00-00Z",
+                store=store,
+            )
+        )
+    return excinfo.value
+
+
+def test_run_node_passes_worker_model_to_claude_launch_env(
+    config: HarnessConfig, project_setup, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    _capture_acp_spawn(monkeypatch)
+    pinned = replace(config, worker_provider_name="claude", worker_model="opus")
+    task = Task(id="w1", type="work", body="do it", targets=["VAL-001"], skill="s")
+
+    captured = _run_node_capturing_spawn(pinned, project_setup, task)
+
+    assert captured.env["ANTHROPIC_MODEL"] == "opus"
+
+
+def test_run_node_passes_validator_model_to_validate_task(
+    config: HarnessConfig, project_setup, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    _capture_acp_spawn(monkeypatch)
+    pinned = replace(
+        config,
+        worker_provider_name="claude",
+        worker_model="sonnet",
+        validator_model="opus",
+    )
+    # A validate task must resolve the validator's pin, not the worker's.
+    task = Task(id="v1", type="validate", body="check it", targets=["VAL-001"], skill="s")
+
+    captured = _run_node_capturing_spawn(pinned, project_setup, task)
+
+    assert captured.env["ANTHROPIC_MODEL"] == "opus"
+
+
+def test_run_node_passes_worker_model_to_codex_launch_command(
+    config: HarnessConfig, project_setup, monkeypatch: pytest.MonkeyPatch
+):
+    _capture_acp_spawn(monkeypatch)
+    pinned = replace(config, worker_provider_name="codex", worker_model="gpt-5.5")
+    task = Task(id="w1", type="work", body="do it", targets=["VAL-001"], skill="s")
+
+    captured = _run_node_capturing_spawn(pinned, project_setup, task)
+
+    # Codex takes the pin on its command line, not through the env.
+    assert 'model="gpt-5.5"' in captured.command
+
+
+def _run_terminal_review_capturing_spawn(
+    config: HarnessConfig, store
+) -> _SpawnCaptured:
+    runner = ACPNodeRunner(config=config, loader=AssetLoader(config))
+
+    async def _no_op_server(*args, **kwargs):
+        return None
+
+    async def _ready_immediately(*args, **kwargs):
+        return None
+
+    runner._start_worker_mcp_server = _no_op_server  # type: ignore[method-assign]
+    runner._wait_for_server_ready = _ready_immediately  # type: ignore[method-assign]
+
+    with pytest.raises(_SpawnCaptured) as excinfo:
+        asyncio.run(
+            runner.run_terminal_review(
+                project_id="p1",
+                mission_id="mission-001",
+                spawn_ts="2026-05-17T00-00-00Z",
+                store=store,
+            )
+        )
+    return excinfo.value
+
+
+def test_run_terminal_review_passes_model_to_claude_launch_env(
+    config: HarnessConfig, project_setup, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    _capture_acp_spawn(monkeypatch)
+    pinned = replace(
+        config,
+        worker_provider_name="claude",
+        worker_model="sonnet",
+        terminal_reviewer_model="opus",
+    )
+
+    captured = _run_terminal_review_capturing_spawn(pinned, project_setup)
+
+    # run_terminal_review is a second, independent spawn path — it must resolve
+    # the terminal reviewer's own pin, not the worker's.
+    assert captured.env["ANTHROPIC_MODEL"] == "opus"
+
+
+def test_run_terminal_review_passes_model_to_codex_launch_command(
+    config: HarnessConfig, project_setup, monkeypatch: pytest.MonkeyPatch
+):
+    _capture_acp_spawn(monkeypatch)
+    pinned = replace(
+        config,
+        worker_provider_name="codex",
+        terminal_reviewer_model="gpt-5.5",
+    )
+
+    captured = _run_terminal_review_capturing_spawn(pinned, project_setup)
+
+    assert 'model="gpt-5.5"' in captured.command
+
+
+def test_run_node_without_model_pin_does_not_set_anthropic_model(
+    config: HarnessConfig, project_setup, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    _capture_acp_spawn(monkeypatch)
+    unpinned = replace(config, worker_provider_name="claude", worker_model=None)
+    task = Task(id="w1", type="work", body="do it", targets=["VAL-001"], skill="s")
+
+    captured = _run_node_capturing_spawn(unpinned, project_setup, task)
+
+    assert "ANTHROPIC_MODEL" not in captured.env
+
+
 def test_synthesize_missing_handoff_records_failure(
     config: HarnessConfig, project_setup, workspace: Path
 ):
@@ -170,6 +341,56 @@ def test_augment_acp_command_claude_untouched():
         _augment_acp_command("claude-agent-acp", PROVIDERS["claude"], reasoning_effort="low")
         == "claude-agent-acp"
     )
+
+
+def test_augment_acp_command_codex_model_override():
+    out = _augment_acp_command("codex-acp", PROVIDERS["codex"], model="gpt-5.5")
+    assert 'model="gpt-5.5"' in out
+    # The bypass flags and effort are model-independent.
+    assert 'sandbox_mode="danger-full-access"' in out
+    assert 'model_reasoning_effort="xhigh"' in out
+
+
+def test_augment_acp_command_codex_without_model_pins_nothing():
+    out = _augment_acp_command("codex-acp", PROVIDERS["codex"])
+    # Only the reasoning-effort key, never a bare `model=` — an unset pin must
+    # leave codex on whatever its own config selects.
+    assert " -c model=" not in out
+
+
+def test_augment_acp_command_claude_untouched_by_model():
+    # claude-agent-acp takes no model flag; the pin travels via ANTHROPIC_MODEL.
+    assert (
+        _augment_acp_command("claude-agent-acp", PROVIDERS["claude"], model="opus")
+        == "claude-agent-acp"
+    )
+
+
+def test_claude_acp_env_pins_anthropic_model():
+    env = _acp_subprocess_env(PROVIDERS["claude"], model="opus")
+    assert env["ANTHROPIC_MODEL"] == "opus"
+
+
+def test_claude_acp_env_without_model_leaves_inherited_value(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("ANTHROPIC_MODEL", "inherited-from-shell")
+
+    env = _acp_subprocess_env(PROVIDERS["claude"])
+
+    # No pin means no opinion: the ambient value survives untouched.
+    assert env["ANTHROPIC_MODEL"] == "inherited-from-shell"
+
+
+def test_codex_acp_env_does_not_set_anthropic_model(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+
+    env = _acp_subprocess_env(PROVIDERS["codex"], model="gpt-5.5")
+
+    # Codex takes its model on the command line, not through an Anthropic env var.
+    assert "ANTHROPIC_MODEL" not in env
 
 
 def test_codex_acp_env_preserves_node_path_when_bwrap_is_present(
