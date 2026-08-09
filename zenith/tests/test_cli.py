@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tomllib
 from pathlib import Path
 
@@ -9,11 +10,24 @@ import pytest
 from click.testing import CliRunner
 
 from zenith_harness.cli import cli
+from zenith_harness.config import HarnessConfig
 
 
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _scrub_ambient_role_env(monkeypatch) -> None:
+    """Init reads ambient ZENITH_* role settings when resolving a lane, so a
+    developer's exported pin, provider or command would otherwise leak into
+    these
+    assertions. Tests that want one set it themselves.
+    """
+    for role in ("WORKER", "VALIDATOR", "TERMINAL_REVIEWER"):
+        for suffix in ("MODEL", "PROVIDER", "ACP_COMMAND", "REASONING_EFFORT"):
+            monkeypatch.delenv(f"ZENITH_{role}_{suffix}", raising=False)
 
 
 @pytest.fixture
@@ -236,9 +250,876 @@ class TestInit:
                 "max",
             ],
         )
+        # A complaint about the caller's environment, reported the way a bad
+        # flag is rather than as a traceback.
+        assert r.exit_code == 2, r.output
+        assert "ZENITH_WORKER_REASONING_EFFORT" in r.output
+
+    def test_claude_init_writes_model_flags(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "claude",
+                "--worker-model",
+                "sonnet",
+                "--validator-model",
+                "opus",
+                "--terminal-reviewer-model",
+                "claude-opus-5[1m]",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+
+        mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
+        server_env = mcp["mcpServers"]["zenith"]["env"]
+        assert server_env["ZENITH_WORKER_MODEL"] == "sonnet"
+        assert server_env["ZENITH_VALIDATOR_MODEL"] == "opus"
+        assert server_env["ZENITH_TERMINAL_REVIEWER_MODEL"] == "claude-opus-5[1m]"
+
+    def test_init_does_not_bake_ambient_model_pins_into_the_workspace(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The pin a shell happens to carry says nothing about which provider it
+        # was chosen for. Forwarding it would make a leftover codex pin durable
+        # in a claude workspace and hand it to claude-agent-acp as
+        # ANTHROPIC_MODEL — the cross-provider landing _inherited_model exists
+        # to prevent. Ambient pins are honored only by a server the user
+        # launches from that same shell; init never writes them down.
+        monkeypatch.setenv("ZENITH_WORKER_MODEL", "gpt-5.5-codex")
+        monkeypatch.setenv("ZENITH_VALIDATOR_MODEL", "gpt-5.5-codex")
+        monkeypatch.setenv("ZENITH_TERMINAL_REVIEWER_MODEL", "gpt-5.5-codex")
+
+        r = runner.invoke(cli, ["init", "--workspace-dir", str(workspace), "--agent", "claude"])
+        assert r.exit_code == 0, r.output
+
+        mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
+        server_env = mcp["mcpServers"]["zenith"]["env"]
+        assert "ZENITH_WORKER_MODEL" not in server_env
+        assert "ZENITH_VALIDATOR_MODEL" not in server_env
+        assert "ZENITH_TERMINAL_REVIEWER_MODEL" not in server_env
+
+    def test_init_model_flags_override_env(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Scrubbed so an exported pin in the developer's own shell cannot leak
+        # in through _forwarded_runtime_env() and break the "not in" assert.
+        for var in (
+            "ZENITH_VALIDATOR_MODEL",
+            "ZENITH_TERMINAL_REVIEWER_MODEL",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("ZENITH_WORKER_MODEL", "sonnet")
+
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "claude",
+                "--worker-model",
+                "opus",
+                "--validator-model",
+                "claude-opus-5[1m]",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+
+        mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
+        server_env = mcp["mcpServers"]["zenith"]["env"]
+        # Flag beats the inherited shell env.
+        assert server_env["ZENITH_WORKER_MODEL"] == "opus"
+        assert server_env["ZENITH_VALIDATOR_MODEL"] == "claude-opus-5[1m]"
+        assert "ZENITH_TERMINAL_REVIEWER_MODEL" not in server_env
+
+    def test_init_invalid_inherited_model_env_fails_when_no_flag_replaces_it(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Unreplaced, the broken pin still reaches a server launched from this
+        # shell, so init refuses rather than deferring the failure.
+        monkeypatch.setenv("ZENITH_WORKER_MODEL", "opus; touch /tmp/pwned")
+
+        r = runner.invoke(
+            cli, ["init", "--workspace-dir", str(workspace), "--agent", "claude"]
+        )
+        assert r.exit_code == 2, r.output
+        assert "ZENITH_WORKER_MODEL" in r.output
+
+    def test_init_ignores_an_invalid_inherited_model_env_a_flag_replaces(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Diverges from the reasoning-effort contract on purpose. An effort var
+        # is forwarded into the workspace, so a broken one stays live; a model
+        # pin is not, and the flag's value is what every server started from
+        # this workspace will read. Failing on a value init has already decided
+        # to ignore would be a dead end for the user.
+        monkeypatch.setenv("ZENITH_WORKER_MODEL", "opus; touch /tmp/pwned")
+
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "claude",
+                "--worker-model",
+                "sonnet",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+
+        mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
+        server_env = mcp["mcpServers"]["zenith"]["env"]
+        assert server_env["ZENITH_WORKER_MODEL"] == "sonnet"
+        # The caller's environment is left as it was found.
+        assert os.environ["ZENITH_WORKER_MODEL"] == "opus; touch /tmp/pwned"
+
+    def test_init_rejects_model_flag_with_shell_metacharacters(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        for var in (
+            "ZENITH_WORKER_MODEL",
+            "ZENITH_VALIDATOR_MODEL",
+            "ZENITH_TERMINAL_REVIEWER_MODEL",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "codex",
+                "--worker-model",
+                'gpt-5.5"; rm -rf /; #',
+            ],
+        )
+
+        # A flag value lands in the same shell command line as the env var, so
+        # it gets the same validation instead of being written out verbatim —
+        # but reported as a usage error naming the flag the user actually
+        # typed, not a traceback naming an env var they never set.
+        assert r.exit_code == 2
+        assert "--worker-model" in r.output
+        assert "ZENITH_WORKER_MODEL" not in r.output
+        assert not (workspace / ".codex" / "config.toml").exists()
+
+    def test_init_rejects_empty_model_flag(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # An inherited pin the user is trying to clear must not be silently
+        # forwarded as if they had said nothing.
+        monkeypatch.setenv("ZENITH_WORKER_MODEL", "sonnet")
+
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "claude",
+                "--worker-model",
+                "",
+            ],
+        )
+
+        assert r.exit_code == 2
+        assert "--worker-model" in r.output
+
+    def test_init_warns_when_model_pin_targets_hermes(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        for var in (
+            "ZENITH_WORKER_MODEL",
+            "ZENITH_VALIDATOR_MODEL",
+            "ZENITH_TERMINAL_REVIEWER_MODEL",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "hermes",
+                "--worker-model",
+                "some-model",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+
+        # hermes takes no model selection, so the pin is a no-op. Init still
+        # succeeds — but silently discarding what the user typed is the bug.
+        assert "warning" in r.output.lower()
+        assert "--worker-model" in r.output
+        assert "hermes" in r.output
+
+    def test_init_persists_terminal_reviewer_provider(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("ZENITH_TERMINAL_REVIEWER_PROVIDER", raising=False)
+        monkeypatch.delenv("ZENITH_TERMINAL_REVIEWER_ACP_COMMAND", raising=False)
+
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "claude",
+                "--terminal-reviewer-provider",
+                "codex",
+                "--terminal-reviewer-acp-command",
+                "codex-acp",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+
+        mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
+        server_env = mcp["mcpServers"]["zenith"]["env"]
+        # Accepted-and-discarded is worse than rejected: the flag reads as
+        # configured while every terminal review runs on the validator's
+        # provider instead.
+        assert server_env["ZENITH_TERMINAL_REVIEWER_PROVIDER"] == "codex"
+        assert server_env["ZENITH_TERMINAL_REVIEWER_ACP_COMMAND"] == "codex-acp"
+
+    def test_init_warns_when_model_flag_targets_hermes(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "hermes",
+                "--worker-model",
+                "some-model",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+
+        assert "warning" in r.output.lower()
+        assert "--worker-model" in r.output
+        assert "hermes" in r.output
+
+    def test_init_warns_when_a_pinned_lane_launches_a_custom_command(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Provider-specific treatment (ANTHROPIC_MODEL for claude, `-c model=`
+        # for codex) is applied for the provider the lane dispatches as, while
+        # the command is configured independently — point at the mismatch
+        # instead of letting the pin vanish into a binary that never reads it.
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "claude",
+                "--terminal-reviewer-acp-command",
+                "codex-acp",
+                "--terminal-reviewer-model",
+                "opus",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+
+        assert "warning" in r.output.lower()
+        assert "terminal reviewer" in r.output
+        assert "codex-acp" in r.output
+
+    def test_init_does_not_warn_when_the_command_is_the_providers_own_default(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Spelling out the default a lane would have used anyway is not a
+        # mismatch. Warning here would train the user to ignore the warning
+        # above, which is the one that means something.
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "claude",
+                "--worker-acp-command",
+                "claude-agent-acp",
+                "--worker-model",
+                "opus",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+
+        assert "warning" not in r.output.lower()
+
+    def test_init_installs_assets_for_a_validator_resolved_from_the_environment(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The reviewer is pinned elsewhere, so it cannot mask the gap by
+        # inheriting the validator's provider: a config naming a codex
+        # validator must come with codex agents and skills on disk.
+        monkeypatch.setenv("ZENITH_VALIDATOR_PROVIDER", "codex")
+
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "claude",
+                "--terminal-reviewer-provider",
+                "claude",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+
+        mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
+        server_env = mcp["mcpServers"]["zenith"]["env"]
+        assert server_env["ZENITH_VALIDATOR_PROVIDER"] == "codex"
+        assert (workspace / ".codex" / "agents").is_dir()
+
+    def test_init_terminal_reviewer_inherits_the_validator_not_the_worker(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Matches for_role("terminal_reviewer"), which falls back to the
+        # validator. Init now WRITES this provider unconditionally, so a wrong
+        # inheritance here cannot be corrected by the runtime chain — the
+        # written value wins.
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "claude",
+                "--validator-provider",
+                "codex",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+
+        mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
+        server_env = mcp["mcpServers"]["zenith"]["env"]
+        assert server_env["ZENITH_TERMINAL_REVIEWER_PROVIDER"] == "codex"
+
+    def test_init_command_flag_beats_ambient_command_env(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Same precedence claim the provider flags carry, for commands.
+        monkeypatch.setenv("ZENITH_VALIDATOR_PROVIDER", "claude")
+        monkeypatch.setenv("ZENITH_VALIDATOR_ACP_COMMAND", "stale-agent-acp")
+
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "claude",
+                "--validator-acp-command",
+                "claude-agent-acp --lane validate",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+
+        mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
+        server_env = mcp["mcpServers"]["zenith"]["env"]
+        assert server_env["ZENITH_VALIDATOR_ACP_COMMAND"] == "claude-agent-acp --lane validate"
+
+    def test_init_drops_an_ambient_command_whose_provider_it_discarded(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Init sets the worker provider itself, so a shell that was talking
+        # about a different provider must not get to set the worker's command.
+        # Keeping half of a stale pair manufactures a claude lane that launches
+        # codex-acp: no sandbox flags, no codex env, and a claude-only ACP mode
+        # id sent to codex — durably, in the config init just wrote.
+        monkeypatch.setenv("ZENITH_WORKER_PROVIDER", "codex")
+        monkeypatch.setenv("ZENITH_WORKER_ACP_COMMAND", "codex-acp")
+
+        r = runner.invoke(cli, ["init", "--workspace-dir", str(workspace), "--agent", "claude"])
+        assert r.exit_code == 0, r.output
+
+        mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
+        server_env = mcp["mcpServers"]["zenith"]["env"]
+        assert server_env["ZENITH_WORKER_PROVIDER"] == "claude"
+        assert server_env.get("ZENITH_WORKER_ACP_COMMAND") != "codex-acp"
+
+    def test_init_keeps_an_ambient_command_paired_with_its_provider(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The other half of the pairing rule: exported together, they describe
+        # one coherent lane, and dropping the command would send it back to the
+        # worker's binary at runtime — the original defect.
+        monkeypatch.setenv("ZENITH_VALIDATOR_PROVIDER", "codex")
+        monkeypatch.setenv("ZENITH_VALIDATOR_ACP_COMMAND", "codex-acp --lane validate")
+
+        r = runner.invoke(cli, ["init", "--workspace-dir", str(workspace), "--agent", "claude"])
+        assert r.exit_code == 0, r.output
+
+        mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
+        server_env = mcp["mcpServers"]["zenith"]["env"]
+        assert server_env["ZENITH_VALIDATOR_PROVIDER"] == "codex"
+        assert server_env["ZENITH_VALIDATOR_ACP_COMMAND"] == "codex-acp --lane validate"
+
+    def test_init_warns_about_a_foreign_command(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The mismatch is a hazard on its own: sandbox flags, the codex config
+        # flags and the ACP session mode all key on provider.name, so a model
+        # pin is incidental to it and the warning is not gated on one.
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "claude",
+                "--worker-acp-command",
+                "codex-acp",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+
+        assert "warning" in r.output.lower()
+        assert "codex-acp" in r.output
+
+    @pytest.mark.parametrize(
+        "command",
+        ["claude-agent-acp --verbose", "/usr/local/bin/claude-agent-acp"],
+    )
+    def test_init_does_not_warn_for_the_providers_own_binary(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+        command: str,
+    ) -> None:
+        # An absolute path or extra arguments still run claude-agent-acp. The
+        # question is which binary runs, not whether the string matches.
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "claude",
+                "--worker-acp-command",
+                command,
+            ],
+        )
+        assert r.exit_code == 0, r.output
+
+        assert "warning" not in r.output.lower()
+
+    def test_init_summary_reports_the_resolved_roles(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The summary is the only thing most users read; it must not contradict
+        # the config written one line earlier.
+        monkeypatch.setenv("ZENITH_VALIDATOR_PROVIDER", "codex")
+
+        r = runner.invoke(cli, ["init", "--workspace-dir", str(workspace), "--agent", "claude"])
+        assert r.exit_code == 0, r.output
+
+        assert "validator=codex" in r.output
+
+    def test_init_warns_when_ambient_provider_env_makes_the_lane_hermes(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # An ambient role provider is resolved AND written, so the warning
+        # describes the workspace init produced rather than the shell it ran
+        # in. Asserting the written value is the point: the host agent is
+        # normally launched later, from a different shell.
+        monkeypatch.setenv("ZENITH_VALIDATOR_PROVIDER", "hermes")
+
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "claude",
+                "--validator-model",
+                "opus",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+
+        assert "warning" in r.output.lower()
+        assert "--validator-model" in r.output
+
+        mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
+        server_env = mcp["mcpServers"]["zenith"]["env"]
+        assert server_env["ZENITH_VALIDATOR_PROVIDER"] == "hermes"
+
+    def test_init_provider_flag_beats_ambient_provider_env(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # A stale export must not overrule what the user typed, and a typo in
+        # it must not fail an init that never consults it.
+        monkeypatch.setenv("ZENITH_VALIDATOR_PROVIDER", "clyde")
+
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "claude",
+                "--validator-provider",
+                "claude",
+                "--validator-model",
+                "opus",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+        assert "warning" not in r.output.lower()
+
+        mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
+        server_env = mcp["mcpServers"]["zenith"]["env"]
+        assert server_env["ZENITH_VALIDATOR_PROVIDER"] == "claude"
+        assert server_env["ZENITH_VALIDATOR_MODEL"] == "opus"
+
+    def test_init_does_not_warn_when_ambient_provider_env_rescues_the_lane(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Mirror case: the reviewer lane resolves to claude, so the pin is
+        # honored and warning about it would be a lie. The rescue has to be
+        # written down for that to stay true after init exits.
+        monkeypatch.setenv("ZENITH_TERMINAL_REVIEWER_PROVIDER", "claude")
+
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "hermes",
+                "--terminal-reviewer-model",
+                "opus",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+
+        assert "--terminal-reviewer-model" not in r.output
+
+        mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
+        server_env = mcp["mcpServers"]["zenith"]["env"]
+        assert server_env["ZENITH_TERMINAL_REVIEWER_PROVIDER"] == "claude"
+        assert server_env["ZENITH_TERMINAL_REVIEWER_MODEL"] == "opus"
+
+    def test_written_config_reproduces_init_resolution_in_a_clean_environment(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The seam every other test in this file stops short of.
+
+        Init resolves lanes; the server resolves them again from the written
+        config, in a later process launched from a different shell. Every
+        divergence between those two resolvers is a bug that per-lane
+        assertions on init's output cannot see, so this drives the real
+        `discover() + for_role()` over exactly what init wrote.
+        """
+        # Validator lands on a different provider than the worker, so the
+        # worker's pin must not reach it; the reviewer lands back on the
+        # worker's provider, so it must jump the gap and pick the pin up.
+        # Both role settings that init can only learn from the environment are
+        # exercised — a provider and a command.
+        monkeypatch.setenv("ZENITH_VALIDATOR_PROVIDER", "codex")
+        monkeypatch.setenv("ZENITH_VALIDATOR_ACP_COMMAND", "codex-acp --lane validate")
+
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "claude",
+                "--worker-model",
+                "opus",
+                "--worker-reasoning-effort",
+                "max",
+                "--terminal-reviewer-provider",
+                "claude",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+
+        mcp = json.loads((workspace / ".mcp.json").read_text(encoding="utf-8"))
+        server_env = mcp["mcpServers"]["zenith"]["env"]
+
+        # Stand in for the later launch: nothing survives but the file.
+        for var in list(os.environ):
+            if var.startswith("ZENITH_") or var == "ANTHROPIC_MODEL":
+                monkeypatch.delenv(var, raising=False)
+        for key, value in server_env.items():
+            monkeypatch.setenv(key, value)
+
+        config = HarnessConfig.discover()
+
+        worker = config.for_role("worker")
+        assert worker.worker_provider_name == "claude"
+        assert worker.worker_model == "opus"
+        assert worker.worker_reasoning_effort == "max"
+        assert worker.resolved_worker_acp_command == "claude-agent-acp"
+
+        validator = config.for_role("validator")
+        assert validator.worker_provider_name == "codex"
+        assert validator.worker_model is None
+        assert validator.resolved_worker_acp_command == "codex-acp --lane validate"
+        # Provider-neutral vocabulary, so this one does inherit across the gap.
+        assert validator.worker_reasoning_effort == "max"
+
+        reviewer = config.for_role("terminal_reviewer")
+        assert reviewer.worker_provider_name == "claude"
+        assert reviewer.worker_model == "opus"
+
+    def test_init_installs_assets_for_terminal_reviewer_provider(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("ZENITH_TERMINAL_REVIEWER_PROVIDER", raising=False)
+
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "claude",
+                "--terminal-reviewer-provider",
+                "codex",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+
+        # The reviewer really runs codex-acp now, so it needs the same asset
+        # surface --validator-provider codex would have installed.
+        assert (workspace / ".codex" / "agents").is_dir()
+
+    def test_init_rejects_unknown_ambient_terminal_reviewer_provider_before_writing(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The flags carry a click.Choice, but an exported var does not — and it
+        # is read late, so a typo used to raise ValueError only after the config
+        # had been written, leaving a half-initialized workspace behind.
+        monkeypatch.setenv("ZENITH_TERMINAL_REVIEWER_PROVIDER", "clyde")
+
+        r = runner.invoke(
+            cli, ["init", "--workspace-dir", str(workspace), "--agent", "claude"]
+        )
+
         assert r.exit_code != 0
-        assert isinstance(r.exception, ValueError)
-        assert "ZENITH_WORKER_REASONING_EFFORT" in str(r.exception)
+        assert "clyde" in r.output
+        assert "ZENITH_TERMINAL_REVIEWER_PROVIDER" in r.output
+        assert not (workspace / ".mcp.json").exists()
+
+    def test_init_error_names_the_variable_that_supplied_the_bad_provider(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("ZENITH_TERMINAL_REVIEWER_PROVIDER", raising=False)
+        # The terminal lane inherits this name, but blaming
+        # ZENITH_TERMINAL_REVIEWER_PROVIDER sends the user hunting for a
+        # variable they never set.
+        monkeypatch.setenv("ZENITH_VALIDATOR_PROVIDER", "clyde")
+
+        r = runner.invoke(
+            cli, ["init", "--workspace-dir", str(workspace), "--agent", "claude"]
+        )
+
+        assert r.exit_code != 0
+        assert "ZENITH_VALIDATOR_PROVIDER" in r.output
+        assert "ZENITH_TERMINAL_REVIEWER_PROVIDER" not in r.output
+        assert not (workspace / ".mcp.json").exists()
+
+    def test_init_validates_validator_provider_even_when_terminal_is_explicit(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("ZENITH_VALIDATOR_PROVIDER", "clyde")
+
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "claude",
+                "--terminal-reviewer-provider",
+                "codex",
+            ],
+        )
+
+        # An explicit terminal provider must not mask a broken validator lane:
+        # without this the typo detonates mid-mission at the first validate
+        # dispatch instead of at init.
+        assert r.exit_code != 0
+        assert "ZENITH_VALIDATOR_PROVIDER" in r.output
+        assert not (workspace / ".mcp.json").exists()
+
+    def test_init_does_not_warn_for_supported_provider_pin(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        for var in (
+            "ZENITH_WORKER_MODEL",
+            "ZENITH_VALIDATOR_MODEL",
+            "ZENITH_TERMINAL_REVIEWER_MODEL",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+        r = runner.invoke(
+            cli,
+            [
+                "init",
+                "--workspace-dir",
+                str(workspace),
+                "--agent",
+                "claude",
+                "--worker-model",
+                "opus",
+            ],
+        )
+        assert r.exit_code == 0, r.output
+        assert "warning" not in r.output.lower()
 
     def test_claude_init_writes_runtime_validator_env_names(
         self, runner: CliRunner, workspace: Path, env: dict[str, str]

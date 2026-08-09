@@ -90,7 +90,10 @@ class ACPError(Exception):
 
 
 def _augment_acp_command(
-    command: str, provider, reasoning_effort: str | None = None
+    command: str,
+    provider,
+    reasoning_effort: str | None = None,
+    model: str | None = None,
 ) -> str:
     """Append provider-specific config flags to the ACP launch command.
 
@@ -103,28 +106,42 @@ def _augment_acp_command(
     `config.VALID_REASONING_EFFORTS` at discovery); None keeps the
     historical "xhigh" default.
 
+    `model` is the per-role pin from ZENITH_<ROLE>_MODEL (validated against
+    `config.MODEL_ID_PATTERN` at discovery); None leaves codex on the model in
+    its own config. Claude takes its pin through ANTHROPIC_MODEL in
+    `_acp_subprocess_env` instead — claude-agent-acp has no model flag.
+
     For hermes the command is passed through unchanged.
     """
     name = getattr(provider, "name", None)
     if name == "codex":
         effort = reasoning_effort or "xhigh"
-        return (
+        augmented = (
             command
             + ' -c sandbox_mode="danger-full-access"'
             + ' -c approval_policy="never"'
             + f' -c model_reasoning_effort="{effort}"'
         )
+        if model:
+            augmented += f' -c model="{model}"'
+        return augmented
     # hermes: no-op
     return command
 
 
-def _acp_subprocess_env(provider) -> dict[str, str]:
+def _acp_subprocess_env(provider, model: str | None = None) -> dict[str, str]:
     """Build the env handed to an ACP-agent subprocess.
 
     For codex we preserve PATH so node-based ACP adapters can launch via
     `/usr/bin/env node`, and pass sandbox-disable hints through env. The
     command line also receives `sandbox_mode="danger-full-access"` in
     `_augment_acp_command`.
+
+    For claude, a per-role `model` pin travels as ANTHROPIC_MODEL — the highest
+    priority input claude-agent-acp reads when picking a model, above
+    settings.json. An unset pin leaves any inherited value alone, which means
+    an unpinned lane runs on an ambient ANTHROPIC_MODEL if one is set rather
+    than on claude-agent-acp's own default.
 
     For hermes the env is passed through unchanged.
     """
@@ -134,6 +151,8 @@ def _acp_subprocess_env(provider) -> dict[str, str]:
         # Env-var hints — harmless if codex ignores them.
         env["CODEX_SANDBOX"] = "danger-full-access"
         env["CODEX_DISABLE_SANDBOX"] = "1"
+    elif name == "claude" and model:
+        env["ANTHROPIC_MODEL"] = model
     # hermes: no special env needed
     return env
 
@@ -579,6 +598,7 @@ class ACPNodeRunner:
             acp_command,
             role_config.worker_provider,
             role_config.worker_reasoning_effort,
+            role_config.worker_model,
         )
 
         workspace_dir = str(Path(cwd).expanduser().resolve() if cwd else store.workspace_dir(project_id))
@@ -638,7 +658,7 @@ class ACPNodeRunner:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=workspace_dir,
-            env=_acp_subprocess_env(role_config.worker_provider),
+            env=_acp_subprocess_env(role_config.worker_provider, role_config.worker_model),
             limit=SUBPROCESS_STREAM_LIMIT,
         )
         progress_tracker = ACPProgressTracker(callback=progress_callback)
@@ -749,6 +769,7 @@ class ACPNodeRunner:
             acp_command,
             role_config.worker_provider,
             role_config.worker_reasoning_effort,
+            role_config.worker_model,
         )
 
         workspace_dir = str(store.workspace_dir(project_id))
@@ -796,7 +817,7 @@ class ACPNodeRunner:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=workspace_dir,
-            env=_acp_subprocess_env(role_config.worker_provider),
+            env=_acp_subprocess_env(role_config.worker_provider, role_config.worker_model),
             limit=SUBPROCESS_STREAM_LIMIT,
         )
         tracker = ACPProgressTracker(callback=progress_callback)
