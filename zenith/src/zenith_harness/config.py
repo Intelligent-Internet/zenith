@@ -33,6 +33,15 @@ def _resolve_optional_path(value: str | None) -> Path | None:
     return Path(value).expanduser().resolve()
 
 
+def _resolve_float(raw: str | None, *, default: float) -> float:
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 def _resolve_max_parallel(value: str | None) -> int:
     if not value:
         return DEFAULT_MAX_PARALLEL_NODES
@@ -72,6 +81,12 @@ class HarnessConfig:
     terminal_reviewer_provider_name: str | None
     terminal_reviewer_acp_command: str | None
     max_parallel_nodes: int = DEFAULT_MAX_PARALLEL_NODES
+    # Bounded dispatch wait: how long advance_project waits for a worker
+    # handoff before returning in_progress. MUST stay under orchestrator MCP
+    # client timeouts (Prime Agent aborts held requests).
+    dispatch_wait_s: float = 50.0
+    # A .dispatched marker older than this with no handoff file = lost attempt.
+    attempt_stale_s: float = 6 * 3600.0
     # Per-role reasoning effort for providers whose ACP command accepts one
     # (codex today). None means the provider default ("xhigh" for codex).
     worker_reasoning_effort: str | None = None
@@ -122,6 +137,12 @@ class HarnessConfig:
             terminal_reviewer_acp_command=terminal_reviewer_acp_command,
             max_parallel_nodes=_resolve_max_parallel(
                 os.environ.get("ZENITH_MAX_PARALLEL_NODES")
+            ),
+            dispatch_wait_s=_resolve_float(
+                os.environ.get("ZENITH_DISPATCH_WAIT_S"), default=50.0
+            ),
+            attempt_stale_s=_resolve_float(
+                os.environ.get("ZENITH_ATTEMPT_STALE_S"), default=6 * 3600.0
             ),
             worker_reasoning_effort=_resolve_reasoning_effort(
                 os.environ.get("ZENITH_WORKER_REASONING_EFFORT"),

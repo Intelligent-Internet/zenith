@@ -7,6 +7,8 @@ tool loops `step()` until a returnable condition.
 from __future__ import annotations
 
 import concurrent.futures
+import json
+import time
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -42,7 +44,7 @@ from .envelope import public_attention_items
 # ---------------------------------------------------------------------------
 
 
-StepKind = Literal["idle", "advanced", "attention_needed", "terminal"]
+StepKind = Literal["idle", "advanced", "attention_needed", "terminal", "in_progress"]
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,14 @@ class StepResult:
     @classmethod
     def terminal(cls, detail: str = "") -> "StepResult":
         return cls("terminal", detail)
+
+    @classmethod
+    def in_progress(cls, detail: str = "") -> "StepResult":
+        """Workers are dispatched and still running; the caller should return
+        now and re-enter advance_project later to reconcile completed handoffs.
+        Exists so a bounded orchestrator call never blocks a whole worker run
+        (MCP clients abort long-held requests)."""
+        return cls("in_progress", detail)
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +163,7 @@ class MissionCoordinator:
         task_state.set_last_attempt(task.id, spawn_ts)
         self.store.save_task_state(self.project_id, mid, task_state)
 
+        self._write_dispatch_marker(mid, task.id, spawn_ts)
         request = DispatchRequest(
             project_id=self.project_id,
             mission_id=mid,
@@ -160,8 +171,11 @@ class MissionCoordinator:
             spawn_ts=spawn_ts,
         )
         try:
-            handoff = self.dispatcher.dispatch(request)
+            handoff, completed = self._call_with_timeout(
+                lambda: self.dispatcher.dispatch(request)
+            )
         except Exception as exc:  # noqa: BLE001
+            self._clear_dispatch_marker(mid, task.id, spawn_ts)
             synthetic = self._synthesize_handoff(task, f"Dispatcher crashed: {exc}")
             self.store.save_attempt(
                 self.project_id,
@@ -171,7 +185,13 @@ class MissionCoordinator:
                 synthetic,
             )
             return self._apply_handoff(mid, task, synthetic, spawn_ts)
+        if not completed:
+            # Bounded-wait law: never hold the orchestrator call for a whole
+            # worker run. The worker writes its own handoff file; the next
+            # advance reconciles it (see _reconcile_pending_attempts).
+            return StepResult.in_progress(f"dispatched {task.id}; worker still running")
 
+        self._clear_dispatch_marker(mid, task.id, spawn_ts)
         self.store.save_attempt(self.project_id, mid, spawn_ts, task.id, handoff)
         return self._apply_handoff(mid, task, handoff, spawn_ts)
 
@@ -271,6 +291,8 @@ class MissionCoordinator:
                 _BatchAttempt(task=task, spawn_ts=spawn_ts)
             )
         self.store.save_task_state(self.project_id, mid, task_state)
+        for attempt in batch_attempts:
+            self._write_dispatch_marker(mid, attempt.task.id, attempt.spawn_ts)
 
         requests = [
             DispatchRequest(
@@ -281,11 +303,19 @@ class MissionCoordinator:
             )
             for attempt in batch_attempts
         ]
-        handoffs = self._dispatch_requests(requests)
+        handoffs, completed = self._call_with_timeout(
+            lambda: self._dispatch_requests(requests)
+        )
+        if not completed:
+            # Bounded-wait law: workers write their own handoff files; the next
+            # advance reconciles them (see _reconcile_pending_attempts).
+            ids = ", ".join(attempt.task.id for attempt in batch_attempts)
+            return StepResult.in_progress(f"dispatched {ids}; workers still running")
 
         attention: list[AttentionItemInternal] = []
         for attempt in sorted(batch_attempts, key=lambda item: item.task.id):
             handoff = handoffs[attempt.task.id]
+            self._clear_dispatch_marker(mid, attempt.task.id, attempt.spawn_ts)
             self.store.save_attempt(
                 self.project_id,
                 mid,
@@ -351,6 +381,50 @@ class MissionCoordinator:
     @staticmethod
     def _batch_spawn_ts(index: int) -> str:
         return f"{utc_now_filesafe()}-{index:04d}"
+
+    # ------------------------------------------------------------------
+    # Bounded dispatch wait + in-flight markers
+    #
+    # The ACP runner's dispatch blocks for the worker's WHOLE run (the ACP
+    # session/prompt request returns only when the worker's turn ends). An
+    # orchestrator MCP call held that long gets aborted by clients (Prime
+    # Agent: "Request was aborted"; the abort can kill the caller's session
+    # cell), which looked exactly like "nothing is running". The worker
+    # process writes its own handoff file independently of this wait, so the
+    # wait is bounded and in-flight attempts are marked; the next
+    # advance_project reconciles completed handoffs from the store.
+    # ------------------------------------------------------------------
+
+    def _dispatch_marker_path(self, mid: str, node_id: str, spawn_ts: str):
+        d = self.store.attempts_runtime_dir(self.project_id, mid)
+        return d / f"{spawn_ts}__{node_id}.dispatched"
+
+    def _write_dispatch_marker(self, mid: str, node_id: str, spawn_ts: str) -> None:
+        path = self._dispatch_marker_path(mid, node_id, spawn_ts)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"spawn_ts": spawn_ts, "node_id": node_id}))
+
+    def _clear_dispatch_marker(self, mid: str, node_id: str, spawn_ts: str) -> None:
+        try:
+            self._dispatch_marker_path(mid, node_id, spawn_ts).unlink()
+        except FileNotFoundError:
+            pass
+
+    def _call_with_timeout(self, fn):
+        """Run fn on a helper thread, bounded by config.dispatch_wait_s.
+
+        Returns (result, True) on completion, (None, False) on timeout. A
+        timed-out thread is left to finish in the background — its result is
+        discarded because the worker's own handoff file is the durable record.
+        """
+        wait_s = getattr(self.store.config, "dispatch_wait_s", 50.0)
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        fut = pool.submit(fn)
+        try:
+            return fut.result(timeout=wait_s), True
+        except concurrent.futures.TimeoutError:
+            pool.shutdown(wait=False)
+            return None, False
 
     def _apply_handoff(
         self,
@@ -760,6 +834,9 @@ class MissionCoordinator:
     ) -> StepResult | None:
         attention: list[AttentionItemInternal] = []
         saw_running = False
+        applied = 0
+        in_flight: list[str] = []
+        stale_s = getattr(self.store.config, "attempt_stale_s", 6 * 3600.0)
         for task in tl.tasks:
             if task_state.status_of(task.id) != "running":
                 continue
@@ -768,8 +845,23 @@ class MissionCoordinator:
             if not attempts:
                 entry = task_state.tasks.get(task.id)
                 spawn_ts = entry.last_attempt if entry is not None else None
+                # In-flight vs lost: a fresh .dispatched marker means a worker
+                # is legitimately still running (bounded-wait dispatch); only
+                # a missing or stale marker means the attempt was lost.
+                marker = (
+                    self._dispatch_marker_path(mid, task.id, spawn_ts)
+                    if spawn_ts is not None
+                    else None
+                )
+                if marker is not None and marker.exists():
+                    age_s = time.time() - marker.stat().st_mtime
+                    if age_s < stale_s:
+                        in_flight.append(task.id)
+                        continue
                 if spawn_ts is None:
                     spawn_ts = utc_now_filesafe()
+                if marker is not None:
+                    self._clear_dispatch_marker(mid, task.id, spawn_ts)
                 handoff = self._synthesize_handoff(
                     task,
                     "Coordinator resumed with task marked running but no attempt file was present.",
@@ -784,21 +876,33 @@ class MissionCoordinator:
                 attention.extend(
                     self._apply_handoff_collect(mid, task, handoff, spawn_ts)
                 )
+                applied += 1
                 continue
             last = attempts[-1]
             read_handoff = self.store.read_attempt(
                 self.project_id, mid, last.spawn_ts, task.id
             )
             if read_handoff is None:
+                # Attempt dir entry exists but no parseable json yet; a fresh
+                # marker means the worker is still writing.
+                marker = self._dispatch_marker_path(mid, task.id, last.spawn_ts)
+                if marker.exists() and (time.time() - marker.stat().st_mtime) < stale_s:
+                    in_flight.append(task.id)
                 continue
+            self._clear_dispatch_marker(mid, task.id, last.spawn_ts)
             attention.extend(
                 self._apply_handoff_collect(mid, task, read_handoff, last.spawn_ts)
             )
+            applied += 1
         if not saw_running:
             return None
         if attention:
             self._raise_attention(attention)
             return StepResult.attention_needed("resume_attention")
+        if applied:
+            return StepResult.advanced(f"reconciled {applied} completed attempt(s)")
+        if in_flight:
+            return StepResult.in_progress("workers still running: " + ", ".join(in_flight))
         return StepResult.advanced("reconciled pending attempts")
 
     # ------------------------------------------------------------------
