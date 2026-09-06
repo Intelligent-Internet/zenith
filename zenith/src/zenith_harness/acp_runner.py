@@ -8,11 +8,20 @@ import os
 import socket
 import subprocess
 import sys
+from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, ClassVar, Coroutine, Literal
 
 from .assets import AssetLoader
+from .acp_auth import (
+    ACPAuthContext,
+    api_grant_receipt,
+    build_acp_subprocess_env,
+    prepare_acp_auth_context,
+    sanitized_process_env,
+)
 from .config import HarnessConfig
 from .dispatcher import DispatchRequest, NodeHandoff
 from .models import (
@@ -92,50 +101,80 @@ class ACPError(Exception):
 def _augment_acp_command(
     command: str, provider, reasoning_effort: str | None = None
 ) -> str:
-    """Append provider-specific config flags to the ACP launch command.
+    """Return the adapter command unchanged.
 
-    For codex-acp this is the no-ask, no-sandbox combo — equivalent to
-    `codex --dangerously-bypass-approvals-and-sandbox`, which codex-acp
-    does not expose as a flag but accepts via `-c` overrides.
-
-    `reasoning_effort` is the per-role override from
-    ZENITH_<ROLE>_REASONING_EFFORT (validated against
-    `config.VALID_REASONING_EFFORTS` at discovery); None keeps the
-    historical "xhigh" default.
-
-    For hermes the command is passed through unchanged.
+    Codex security settings live in the dedicated managed CODEX_HOME.  Appending
+    CLI-style ``-c`` flags to ``codex-acp`` is both unenforced by the adapter and
+    risks selecting the legacy danger-full-access sandbox path.
     """
-    name = getattr(provider, "name", None)
-    if name == "codex":
-        effort = reasoning_effort or "xhigh"
-        return (
-            command
-            + ' -c sandbox_mode="danger-full-access"'
-            + ' -c approval_policy="never"'
-            + f' -c model_reasoning_effort="{effort}"'
-        )
-    # hermes: no-op
+    del provider, reasoning_effort
     return command
 
 
-def _acp_subprocess_env(provider) -> dict[str, str]:
-    """Build the env handed to an ACP-agent subprocess.
+def _acp_subprocess_env(
+    provider,
+    auth: ACPAuthContext | None = None,
+    reasoning_effort: str | None = None,
+) -> dict[str, str]:
+    """Build the allowlisted environment handed to an ACP subprocess."""
 
-    For codex we preserve PATH so node-based ACP adapters can launch via
-    `/usr/bin/env node`, and pass sandbox-disable hints through env. The
-    command line also receives `sandbox_mode="danger-full-access"` in
-    `_augment_acp_command`.
-
-    For hermes the env is passed through unchanged.
-    """
-    env = os.environ.copy()
-    name = getattr(provider, "name", None)
-    if name == "codex":
-        # Env-var hints — harmless if codex ignores them.
-        env["CODEX_SANDBOX"] = "danger-full-access"
-        env["CODEX_DISABLE_SANDBOX"] = "1"
-    # hermes: no special env needed
+    env = build_acp_subprocess_env(provider, auth)
+    if getattr(provider, "name", None) == "codex":
+        env["CODEX_CONFIG"] = json.dumps(
+            {"model_reasoning_effort": reasoning_effort or "xhigh"}
+        )
     return env
+
+
+def _write_api_authorization_receipt(
+    *,
+    path: Path,
+    auth: ACPAuthContext,
+    project_id: str,
+    mission_id: str,
+    task_id: str,
+    provider_name: str,
+    started_at: str,
+    status: str,
+    finished_at: str | None = None,
+    exit_code: int | None = None,
+) -> None:
+    grant_fields = api_grant_receipt(auth)
+    if grant_fields is None:
+        return
+    payload: dict[str, Any] = {
+        "version": 1,
+        "project_id": project_id,
+        "mission_id": mission_id,
+        "task_id": task_id,
+        "provider": provider_name,
+        "started_at": started_at,
+        "status": status,
+        **grant_fields,
+    }
+    if finished_at is not None:
+        payload["finished_at"] = finished_at
+    if exit_code is not None:
+        payload["exit_code"] = exit_code
+    atomic_write_json(path, payload)
+
+
+async def _enforce_api_grant_expiry(
+    process: asyncio.subprocess.Process,
+    auth: ACPAuthContext,
+    expired: asyncio.Event,
+) -> None:
+    """Terminate the only key-bearing process when its operator grant expires."""
+
+    grant = auth.api_grant
+    if grant is None:
+        return
+    delay = max(0.0, (grant.expires_at - datetime.now(UTC)).total_seconds())
+    await asyncio.sleep(delay)
+    expired.set()
+    if process.returncode is None:
+        with suppress(OSError, ProcessLookupError):
+            process.terminate()
 
 
 _NOT_FOUND = object()
@@ -581,10 +620,34 @@ class ACPNodeRunner:
             role_config.worker_reasoning_effort,
         )
 
+        auth_context = prepare_acp_auth_context(
+            config=role_config,
+            provider=role_config.worker_provider,
+            task=task,
+            project_id=project_id,
+            mission_id=mission_id,
+        )
+
         workspace_dir = str(Path(cwd).expanduser().resolve() if cwd else store.workspace_dir(project_id))
         project_bucket = str(store.zenith_dir(project_id))
         handoff_path = store.attempt_path(project_id, mission_id, spawn_ts, task.id)
         handoff_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_path = (
+            store.mission_runtime_dir(project_id, mission_id)
+            / "billing-receipts"
+            / f"{spawn_ts}__{task.id}.json"
+        )
+        receipt_started_at = datetime.now(UTC).isoformat()
+        _write_api_authorization_receipt(
+            path=receipt_path,
+            auth=auth_context,
+            project_id=project_id,
+            mission_id=mission_id,
+            task_id=task.id,
+            provider_name=role_config.worker_provider.name,
+            started_at=receipt_started_at,
+            status="authorized",
+        )
 
         # 0) For claude-agent-acp: drop a project-level settings.json that
         #    overrides the user's global ~/.claude/settings.json. Adapter
@@ -609,6 +672,17 @@ class ACPNodeRunner:
             if mcp_process.returncode is None:
                 mcp_process.terminate()
             await _close_subprocess(mcp_process, timeout=5)
+            _write_api_authorization_receipt(
+                path=receipt_path,
+                auth=auth_context,
+                project_id=project_id,
+                mission_id=mission_id,
+                task_id=task.id,
+                provider_name=role_config.worker_provider.name,
+                started_at=receipt_started_at,
+                status="mcp_start_failed",
+                finished_at=datetime.now(UTC).isoformat(),
+            )
             return self._synthesize_missing_handoff(
                 task, summary="Worker MCP server failed to start"
             )
@@ -632,14 +706,36 @@ class ACPNodeRunner:
         )
 
         # 3) Spawn the ACP agent.
-        process = await asyncio.create_subprocess_shell(
-            acp_command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=workspace_dir,
-            env=_acp_subprocess_env(role_config.worker_provider),
-            limit=SUBPROCESS_STREAM_LIMIT,
+        try:
+            process = await asyncio.create_subprocess_shell(
+                acp_command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=workspace_dir,
+                env=_acp_subprocess_env(
+                    role_config.worker_provider,
+                    auth_context,
+                    role_config.worker_reasoning_effort,
+                ),
+                limit=SUBPROCESS_STREAM_LIMIT,
+            )
+        except Exception:  # noqa: BLE001
+            _write_api_authorization_receipt(
+                path=receipt_path,
+                auth=auth_context,
+                project_id=project_id,
+                mission_id=mission_id,
+                task_id=task.id,
+                provider_name=role_config.worker_provider.name,
+                started_at=receipt_started_at,
+                status="acp_start_failed",
+                finished_at=datetime.now(UTC).isoformat(),
+            )
+            raise
+        grant_expired = asyncio.Event()
+        grant_expiry_task = asyncio.create_task(
+            _enforce_api_grant_expiry(process, auth_context, grant_expired)
         )
         progress_tracker = ACPProgressTracker(callback=progress_callback)
         client = ACPClient(
@@ -690,6 +786,9 @@ class ACPNodeRunner:
             session_error = str(exc)
             logger.error("ACP session failed for node %s: %s", task.id, exc)
         finally:
+            grant_expiry_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await grant_expiry_task
             await progress_tracker.flush()
             if process.returncode is None:
                 try:
@@ -715,6 +814,18 @@ class ACPNodeRunner:
                 except OSError:
                     pass
             await _close_subprocess(mcp_process, timeout=5)
+            _write_api_authorization_receipt(
+                path=receipt_path,
+                auth=auth_context,
+                project_id=project_id,
+                mission_id=mission_id,
+                task_id=task.id,
+                provider_name=role_config.worker_provider.name,
+                started_at=receipt_started_at,
+                status="grant_expired" if grant_expired.is_set() else "finished",
+                finished_at=datetime.now(UTC).isoformat(),
+                exit_code=worker_exit_code,
+            )
 
         # 5) Parse and return.
         if handoff_path.exists():
@@ -749,6 +860,14 @@ class ACPNodeRunner:
             acp_command,
             role_config.worker_provider,
             role_config.worker_reasoning_effort,
+        )
+
+        auth_context = prepare_acp_auth_context(
+            config=role_config,
+            provider=role_config.worker_provider,
+            task=None,
+            project_id=project_id,
+            mission_id=mission_id,
         )
 
         workspace_dir = str(store.workspace_dir(project_id))
@@ -796,7 +915,11 @@ class ACPNodeRunner:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=workspace_dir,
-            env=_acp_subprocess_env(role_config.worker_provider),
+            env=_acp_subprocess_env(
+                role_config.worker_provider,
+                auth_context,
+                role_config.worker_reasoning_effort,
+            ),
             limit=SUBPROCESS_STREAM_LIMIT,
         )
         tracker = ACPProgressTracker(callback=progress_callback)
@@ -895,7 +1018,7 @@ class ACPNodeRunner:
             "--port",
             str(mcp_port),
         ]
-        env = os.environ.copy()
+        env = sanitized_process_env()
         env["ZENITH_HOME"] = str(self.config.harness_home)
         env["ZENITH_PROJECT_ID"] = project_id
         env["ZENITH_MISSION_ID"] = mission_id
@@ -933,7 +1056,8 @@ class ACPNodeRunner:
             "--port",
             str(mcp_port),
         ]
-        env = os.environ.copy()
+        env = sanitized_process_env()
+        env["ZENITH_HOME"] = str(self.config.harness_home)
         env["ZENITH_PROJECT_ID"] = project_id
         env["ZENITH_MISSION_ID"] = mission_id
         env["ZENITH_TERMINAL_REVIEW_PATH"] = report_path

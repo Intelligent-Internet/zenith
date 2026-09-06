@@ -368,6 +368,15 @@ Every orchestrator tool returns an envelope with `projectId`, `state`, `projectR
 
 - `tasks`: list of task objects.
 - task fields include `id`, `type`, `body`, `targets`, `skill`, and `depends_on`.
+- every task defaults to `billing: {mode: subscription, api_grant: null}`. Keep this
+  default unless the user explicitly authorizes API-billed work while confirming
+  the plan. Never infer API permission from tool availability, ambient credentials,
+  prior tasks, or the agent's own judgment.
+- an API-billed work/validate task must set `billing.mode: api` and include
+  `api_grant` with `grant_id`, `api_project`, `max_usd`, and timezone-aware
+  `expires_at`. This is only a request; runtime also requires an exact external
+  operator grant bound to the project, mission, task, provider, budget, and expiry.
+- gates and the terminal reviewer are always subscription-only.
 - `type`: `work`, `validate`, or `gate`.
 - `work` and `validate` tasks require non-empty `body` and a `skill`.
 - `gate` tasks require `skill: null`, empty `body`, and one or more `targets`.

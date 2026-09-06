@@ -1,9 +1,10 @@
 """Submit-time task-list validation. See `specs/task_list/PRODUCT.md`."""
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from zenith_harness.models import Task, TaskList
+from zenith_harness.models import ApiGrantRequest, BillingPolicy, Task, TaskList
 from zenith_harness.task_validation import (
     check_acyclic,
     check_coverage,
@@ -115,6 +116,24 @@ class TestTaskShape:
         tl = TaskList(tasks=[_task("g1", "gate", [])])
         errs = check_task_shape(tl)
         assert any(e.code == "empty_targets" for e in errs)
+
+    def test_gate_with_api_billing_rejected(self) -> None:
+        task = _task("g1", "gate", ["X"])
+        task = task.model_copy(
+            update={
+                "billing": BillingPolicy(
+                    mode="api",
+                    api_grant=ApiGrantRequest(
+                        grant_id="grant-001",
+                        api_project="project",
+                        max_usd="1.00",
+                        expires_at=datetime.now(UTC) + timedelta(hours=1),
+                    ),
+                )
+            }
+        )
+        errs = check_task_shape(TaskList(tasks=[task]))
+        assert any(e.code == "gate_with_api_billing" for e in errs)
 
 
 class TestDepsResolve:

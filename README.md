@@ -76,6 +76,62 @@ npm install -g @agentclientprotocol/codex-acp
 command -v codex-acp
 ```
 
+**Codex authentication and API billing**
+
+Codex ACP tasks default to ChatGPT subscription authentication. Zenith creates a
+dedicated managed home at `$ZENITH_HOME/codex-subscription` (override with
+`ZENITH_CODEX_SUBSCRIPTION_HOME`) with ChatGPT-only login, login shells disabled,
+shell snapshots disabled, and no inherited shell environment. Authenticate that
+home once before the first Codex ACP mission:
+
+```bash
+CODEX_HOME="${ZENITH_CODEX_SUBSCRIPTION_HOME:-$HOME/.zenith/codex-subscription}" codex login
+```
+
+Ambient API keys are not forwarded to ACP agents or their Zenith MCP helpers. An
+API-billed task must contain an explicit non-secret request:
+
+```yaml
+billing:
+  mode: api
+  api_grant:
+    grant_id: issue-123-image
+    api_project: isolated-image-project
+    max_usd: "5.00"
+    expires_at: "2026-09-04T18:00:00Z"
+```
+
+That request does not authorize itself. The operator must also set
+`ZENITH_API_GRANTS_FILE` to a private (`0600`), operator-owned JSON registry whose
+record exactly matches the Zenith project, mission, task, provider, API project,
+budget, and expiry. The credential lives in a separate private one-line file:
+
+```json
+{
+  "version": 1,
+  "grants": [{
+    "grant_id": "issue-123-image",
+    "zenith_project_id": "20260904T120000Z-example",
+    "mission_id": "mission-001",
+    "task_id": "w-image",
+    "provider": "codex",
+    "api_project": "isolated-image-project",
+    "max_usd": "5.00",
+    "issued_at": "2026-09-04T12:00:00Z",
+    "expires_at": "2026-09-04T18:00:00Z",
+    "approved_by": "operator@example",
+    "credential_file": "/secure/zenith/issue-123-image.key",
+    "revoked": false
+  }]
+}
+```
+
+Only the matching ACP child receives `OPENAI_API_KEY`; the MCP helper does not.
+Authorization receipts without credentials are written under the mission's
+`.zenith-runtime/billing-receipts/`. `max_usd` is an authorization ceiling checked
+by Zenith, not a live usage meter, so the referenced OpenAI project/service account
+must have the corresponding provider-side budget and restrictions.
+
 **Initialize a workspace**
 
 Initialize the project workspace Zenith should operate on. This is your target app/repo, not the Zenith source checkout:

@@ -141,6 +141,30 @@ class TestInit:
         assert server_env["ZENITH_VALIDATOR_REASONING_EFFORT"] == "medium"
         assert server_env["ZENITH_TERMINAL_REVIEWER_REASONING_EFFORT"] == "low"
 
+    def test_codex_init_forwards_auth_registry_paths_without_api_key(
+        self,
+        runner: CliRunner,
+        workspace: Path,
+        env: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        subscription_home = workspace / "subscription-auth"
+        grants_file = workspace / "api-grants.json"
+        monkeypatch.setenv("ZENITH_CODEX_SUBSCRIPTION_HOME", str(subscription_home))
+        monkeypatch.setenv("ZENITH_API_GRANTS_FILE", str(grants_file))
+        monkeypatch.setenv("OPENAI_API_KEY", "must-not-enter-host-config")
+
+        r = runner.invoke(cli, ["init", "--workspace-dir", str(workspace), "--agent", "codex"])
+        assert r.exit_code == 0, r.output
+
+        config = tomllib.loads(
+            (workspace / ".codex" / "config.toml").read_text(encoding="utf-8")
+        )
+        server_env = config["mcp_servers"]["zenith"]["env"]
+        assert server_env["ZENITH_CODEX_SUBSCRIPTION_HOME"] == str(subscription_home)
+        assert server_env["ZENITH_API_GRANTS_FILE"] == str(grants_file)
+        assert "OPENAI_API_KEY" not in server_env
+
     def test_codex_init_escapes_quoted_acp_commands(
         self, runner: CliRunner, workspace: Path, env: dict[str, str]
     ) -> None:

@@ -56,6 +56,21 @@ def test_discover_defaults_to_four_parallel_nodes(
     config = HarnessConfig.discover()
 
     assert config.max_parallel_nodes == 4
+    assert config.resolved_codex_subscription_home == harness_home / "codex-subscription"
+    assert config.api_grants_file is None
+
+
+def test_discover_explicit_codex_auth_paths(monkeypatch, harness_home: Path) -> None:
+    subscription_home = harness_home / "subscription-auth"
+    grants_file = harness_home / "grants.json"
+    monkeypatch.setenv("ZENITH_HOME", str(harness_home))
+    monkeypatch.setenv("ZENITH_CODEX_SUBSCRIPTION_HOME", str(subscription_home))
+    monkeypatch.setenv("ZENITH_API_GRANTS_FILE", str(grants_file))
+
+    config = HarnessConfig.discover()
+
+    assert config.resolved_codex_subscription_home == subscription_home
+    assert config.api_grants_file == grants_file
 
 
 def test_discover_explicit_one_uses_serial_parallelism(
@@ -123,7 +138,7 @@ def test_discover_invalid_reasoning_effort_rejected(
     monkeypatch.setenv("ZENITH_HOME", str(harness_home))
     monkeypatch.delenv("ZENITH_PROJECT_BUCKET_DIR", raising=False)
     _clear_effort_env(monkeypatch)
-    # Not silently ignored: the value lands in a shell command line, and a
+    # Not silently ignored: the value lands in the ACP adapter config, and a
     # typo'd downgrade would silently keep spending xhigh.
     monkeypatch.setenv("ZENITH_VALIDATOR_REASONING_EFFORT", "extra-high")
 

@@ -106,6 +106,8 @@ def check_task_shape(tl: TaskList) -> list[ValidationError]:
                 errors.append(ValidationError("gate_with_body", task.id))
             if not task.targets:
                 errors.append(ValidationError("empty_targets", task.id))
+            if task.billing.mode != "subscription":
+                errors.append(ValidationError("gate_with_api_billing", task.id))
         else:
             if not task.skill:
                 errors.append(

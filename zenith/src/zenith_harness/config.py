@@ -15,7 +15,7 @@ from .providers import (
 DEFAULT_MAX_PARALLEL_NODES = 4
 
 # codex-acp `model_reasoning_effort` values. Also a safety allowlist: the
-# resolved value is spliced into a shell command line by acp_runner. Codex's
+# resolved value is serialized into the adapter's CODEX_CONFIG. Codex's
 # "ultra" is deliberately excluded: it is not a reasoning tier (codex
 # downgrades the request to "max" on the wire) but a switch to proactive
 # multi-agent mode — a lane spawning its own agent swarm inside a harness
@@ -72,6 +72,8 @@ class HarnessConfig:
     terminal_reviewer_provider_name: str | None
     terminal_reviewer_acp_command: str | None
     max_parallel_nodes: int = DEFAULT_MAX_PARALLEL_NODES
+    codex_subscription_home: Path | None = None
+    api_grants_file: Path | None = None
     # Per-role reasoning effort for providers whose ACP command accepts one
     # (codex today). None means the provider default ("xhigh" for codex).
     worker_reasoning_effort: str | None = None
@@ -109,6 +111,12 @@ class HarnessConfig:
         terminal_reviewer_acp_command = os.environ.get(
             "ZENITH_TERMINAL_REVIEWER_ACP_COMMAND"
         )
+        codex_subscription_home = _resolve_optional_path(
+            os.environ.get("ZENITH_CODEX_SUBSCRIPTION_HOME")
+        )
+        api_grants_file = _resolve_optional_path(
+            os.environ.get("ZENITH_API_GRANTS_FILE")
+        )
         return cls(
             bundled_dir=_bundled_dir(),
             harness_home=harness_home,
@@ -123,6 +131,8 @@ class HarnessConfig:
             max_parallel_nodes=_resolve_max_parallel(
                 os.environ.get("ZENITH_MAX_PARALLEL_NODES")
             ),
+            codex_subscription_home=codex_subscription_home,
+            api_grants_file=api_grants_file,
             worker_reasoning_effort=_resolve_reasoning_effort(
                 os.environ.get("ZENITH_WORKER_REASONING_EFFORT"),
                 env_var="ZENITH_WORKER_REASONING_EFFORT",
@@ -207,6 +217,10 @@ class HarnessConfig:
             self.resolved_validator_acp_command
             or self.terminal_reviewer_provider.default_worker_acp_command
         )
+
+    @property
+    def resolved_codex_subscription_home(self) -> Path:
+        return self.codex_subscription_home or self.harness_home / "codex-subscription"
 
     @property
     def provider_selection(self) -> ProviderSelection:

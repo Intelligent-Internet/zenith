@@ -21,6 +21,7 @@ from zenith_harness.acp_runner import (
     _acp_subprocess_env,
     _augment_acp_command,
 )
+from zenith_harness.acp_auth import ACPAuthContext
 from zenith_harness.providers import PROVIDERS
 from zenith_harness.assets import AssetLoader
 from zenith_harness.config import HarnessConfig
@@ -147,21 +148,38 @@ def test_synthesize_missing_handoff_records_failure(
     assert handoff_path.exists()
 
 
-def test_augment_acp_command_codex_appends_bypass_flags():
+def test_augment_acp_command_codex_does_not_append_bypass_flags():
     out = _augment_acp_command("codex-acp", PROVIDERS["codex"])
-    assert 'sandbox_mode="danger-full-access"' in out
-    assert 'approval_policy="never"' in out
-    assert 'model_reasoning_effort="xhigh"' in out
-    assert out.startswith("codex-acp ")
+    assert out == "codex-acp"
 
 
 def test_augment_acp_command_codex_reasoning_effort_override():
     out = _augment_acp_command("codex-acp", PROVIDERS["codex"], reasoning_effort="medium")
-    assert 'model_reasoning_effort="medium"' in out
-    assert "xhigh" not in out
-    # The bypass flags are effort-independent.
-    assert 'sandbox_mode="danger-full-access"' in out
-    assert 'approval_policy="never"' in out
+    assert out == "codex-acp"
+
+
+def test_codex_acp_reasoning_effort_uses_sanitized_adapter_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    monkeypatch.setenv(
+        "CODEX_CONFIG",
+        json.dumps(
+            {
+                "model_reasoning_effort": "max",
+                "sandbox_mode": "danger-full-access",
+                "approval_policy": "never",
+            }
+        ),
+    )
+
+    env = _acp_subprocess_env(
+        PROVIDERS["codex"],
+        ACPAuthContext(mode="subscription", codex_home=tmp_path / "codex-home"),
+        reasoning_effort="medium",
+    )
+
+    assert json.loads(env["CODEX_CONFIG"]) == {"model_reasoning_effort": "medium"}
 
 
 def test_augment_acp_command_claude_untouched():
@@ -183,11 +201,14 @@ def test_codex_acp_env_preserves_node_path_when_bwrap_is_present(
         path.chmod(0o755)
     monkeypatch.setenv("PATH", str(bin_dir))
 
-    env = _acp_subprocess_env(PROVIDERS["codex"])
+    env = _acp_subprocess_env(
+        PROVIDERS["codex"],
+        ACPAuthContext(mode="subscription", codex_home=tmp_path / "codex-home"),
+    )
 
     assert str(bin_dir) in env["PATH"].split(os.pathsep)
-    assert env["CODEX_SANDBOX"] == "danger-full-access"
-    assert env["CODEX_DISABLE_SANDBOX"] == "1"
+    assert "CODEX_SANDBOX" not in env
+    assert "CODEX_DISABLE_SANDBOX" not in env
 
 
 def test_attempt_path_naming(config: HarnessConfig, project_setup):

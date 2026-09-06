@@ -5,7 +5,9 @@ import pytest
 from pydantic import ValidationError as PydanticValidationError
 
 from zenith_harness.models import (
+    ApiGrantRequest,
     AttentionNeeded,
+    BillingPolicy,
     Decision,
     Draft,
     Envelope,
@@ -27,6 +29,44 @@ class TestTask:
         assert t.skill == "api-contract-worker"
         assert t.depends_on == []
         assert t.auto_merge is True
+        assert t.billing.mode == "subscription"
+        assert t.billing.api_grant is None
+
+    def test_api_billing_requires_explicit_grant(self) -> None:
+        with pytest.raises(PydanticValidationError):
+            BillingPolicy(mode="api")
+
+    def test_subscription_rejects_api_grant(self) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        request = ApiGrantRequest(
+            grant_id="grant-001",
+            api_project="project",
+            max_usd="1.00",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+        with pytest.raises(PydanticValidationError):
+            BillingPolicy(mode="subscription", api_grant=request)
+
+    def test_task_rejects_inline_api_key(self) -> None:
+        with pytest.raises(PydanticValidationError):
+            Task(
+                id="w1",
+                type="work",
+                body="work",
+                targets=["VAL-001"],
+                skill="s",
+                billing={
+                    "mode": "api",
+                    "api_grant": {
+                        "grant_id": "grant-001",
+                        "api_project": "project",
+                        "max_usd": "1.00",
+                        "expires_at": "2026-09-04T18:00:00Z",
+                        "api_key": "must-never-be-accepted",
+                    },
+                },
+            )
 
     def test_work_accepts_legacy_auto_merge_field(self) -> None:
         t = Task(

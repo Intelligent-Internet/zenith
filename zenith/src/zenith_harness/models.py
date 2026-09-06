@@ -14,9 +14,10 @@ Attempt filenames keep the `<ts>__<node_id>.json` token for on-disk continuity
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # Identifier conventions
@@ -25,16 +26,61 @@ from pydantic import BaseModel, ConfigDict, Field
 ASSERTION_ID_REGEX = re.compile(r"^[A-Z][A-Z0-9-]+$")
 TASK_ID_REGEX = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 SKILL_NAME_REGEX = re.compile(r"^[a-z][a-z0-9_-]*$")
+API_GRANT_ID_REGEX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 TaskType = Literal["work", "validate", "gate"]
 TaskStatus = Literal["pending", "running", "cleared", "failed", "superseded"]
 AssertionStatus = Literal["pending", "passed", "failed"]
+BillingMode = Literal["subscription", "api"]
 
 
 # ---------------------------------------------------------------------------
 # Task / TaskList (orchestrator authors at submit_plan + via TaskListPatch)
 # ---------------------------------------------------------------------------
+
+
+class ApiGrantRequest(BaseModel):
+    """Non-secret API authorization requested by one task.
+
+    This request never authorizes itself.  The runtime must match it to an
+    operator-owned grant registry before any credential is injected.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    grant_id: str = Field(
+        pattern=API_GRANT_ID_REGEX.pattern,
+        description="Operator-issued grant id; contains no credential material.",
+    )
+    api_project: str = Field(
+        min_length=1,
+        description="Exact provider project the credential is restricted to.",
+    )
+    max_usd: Decimal = Field(
+        gt=0,
+        description="Maximum authorized spend recorded for this task.",
+    )
+    expires_at: AwareDatetime = Field(
+        description="Timezone-aware expiry copied from the operator grant.",
+    )
+
+
+class BillingPolicy(BaseModel):
+    """Task billing mode. Subscription is the fail-closed default."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: BillingMode = "subscription"
+    api_grant: ApiGrantRequest | None = None
+
+    @model_validator(mode="after")
+    def validate_mode_and_grant(self) -> BillingPolicy:
+        if self.mode == "subscription" and self.api_grant is not None:
+            raise ValueError("subscription billing must not include api_grant")
+        if self.mode == "api" and self.api_grant is None:
+            raise ValueError("api billing requires api_grant")
+        return self
 
 
 class Task(BaseModel):
@@ -83,6 +129,13 @@ class Task(BaseModel):
             "Upstream task ids that must reach a terminal status before this task "
             "becomes runnable. Dependencies are untyped — gate semantics come from "
             "`type == 'gate'`, not from the dep itself."
+        ),
+    )
+    billing: BillingPolicy = Field(
+        default_factory=BillingPolicy,
+        description=(
+            "Credential policy for this task. Defaults to subscription. API mode "
+            "is only a request and requires an exact external operator grant."
         ),
     )
 
