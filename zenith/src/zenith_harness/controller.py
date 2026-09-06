@@ -137,7 +137,9 @@ class ProjectController:
         self.store.sync_workspace_skill_surfaces(project_id)
         return self._build_envelope(project_id, dag_mode="frontier")
 
-    def end_mission(self, project_id: str) -> Envelope:
+    def end_mission(
+        self, project_id: str, deliverable_roots: list[str] | None = None
+    ) -> Envelope:
         state = self._require_state(project_id)
         if not isinstance(state, MissionRunning):
             raise ToolError(
@@ -147,7 +149,22 @@ class ProjectController:
         coordinator = MissionCoordinator(
             self.store, project_id, self.dispatcher, self.terminal_reviewer
         )
-        result = coordinator.close_mission(state.mission_id)
+        try:
+            resolved_roots = (
+                None
+                if deliverable_roots is None
+                else self.store.resolve_terminal_review_roots(
+                    project_id, state.mission_id, deliverable_roots
+                )
+            )
+        except ValueError as exc:
+            raise ToolError("invalid_deliverable_roots", str(exc)) from exc
+        try:
+            result = coordinator.close_mission(
+                state.mission_id, deliverable_roots=resolved_roots
+            )
+        except ValueError as exc:
+            raise ToolError("invalid_deliverable_roots", str(exc)) from exc
         if result.kind == "idle":
             raise ToolError(
                 "mission_not_ready_to_close",

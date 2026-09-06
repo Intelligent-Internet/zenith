@@ -347,6 +347,18 @@ class TerminalReviewHandoff(BaseModel):
     report: str = ""
 
 
+class TerminalReviewConfig(BaseModel):
+    """Canonical roots authorized by closure-review policy after preflight.
+
+    This is a best-effort guard against accidental process-history exposure,
+    not an OS filesystem sandbox or hard read-isolation boundary.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    deliverable_roots: list[str] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # On-disk runtime cursors (HARNESS bucket; orchestrator-internal)
 # ---------------------------------------------------------------------------
@@ -462,6 +474,7 @@ __all__ = [
     "ValidationItem",
     "ValidateHandoff",
     "TerminalReviewHandoff",
+    "TerminalReviewConfig",
     "TaskStateEntry",
     "TaskStateFile",
     "ContractStateEntry",

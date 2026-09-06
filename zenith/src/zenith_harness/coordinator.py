@@ -30,6 +30,7 @@ from .models import (
     Task,
     TaskList,
     TaskStateFile,
+    TerminalReviewConfig,
     ValidateHandoff,
     WorkHandoff,
 )
@@ -424,7 +425,9 @@ class MissionCoordinator:
             request_attention=False,
         )
 
-    def close_mission(self, mid: str) -> StepResult:
+    def close_mission(
+        self, mid: str, *, deliverable_roots: list[str] | None = None
+    ) -> StepResult:
         state = self.store.load_state(self.project_id)
         if not isinstance(state, MissionRunning):
             return StepResult.idle("close_mission requires mission_running")
@@ -451,6 +454,12 @@ class MissionCoordinator:
                 f"mission has runnable task work ({task.id}); call advance_project first"
             )
 
+        if deliverable_roots is not None:
+            self.store.save_terminal_review_config(
+                self.project_id,
+                mid,
+                TerminalReviewConfig(deliverable_roots=deliverable_roots),
+            )
         return self._enter_terminal_review(mid)
 
     # ------------------------------------------------------------------
@@ -716,6 +725,18 @@ class MissionCoordinator:
     # ------------------------------------------------------------------
 
     def _enter_terminal_review(self, mid: str) -> StepResult:
+        config = self.store.load_terminal_review_config(self.project_id, mid)
+        # Revalidate persisted roots immediately before dispatch. This canonical
+        # policy preflight is best-effort; reviewer access is not OS-sandboxed.
+        resolved_roots = self.store.resolve_terminal_review_roots(
+            self.project_id, mid, config.deliverable_roots
+        )
+        if resolved_roots != config.deliverable_roots:
+            self.store.save_terminal_review_config(
+                self.project_id,
+                mid,
+                TerminalReviewConfig(deliverable_roots=resolved_roots),
+            )
         spawn_ts = utc_now_filesafe()
         try:
             report = self.terminal_reviewer.review(self.project_id, mid, spawn_ts)

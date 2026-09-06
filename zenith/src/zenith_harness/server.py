@@ -211,11 +211,26 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
     )
     async def end_mission(
         project_id: Annotated[str, Field(description="Project id.")],
+        deliverable_roots: Annotated[
+            list[str] | None,
+            Field(
+                default=None,
+                description=(
+                    "Final-artifact roots authorized by terminal-review policy in "
+                    "addition to the normal workspace product surface. None keeps the "
+                    "persisted declaration (default empty), [] clears it, and a "
+                    "non-empty list replaces it after canonical preflight. This is a "
+                    "best-effort independence guard, not an OS filesystem sandbox."
+                ),
+            ),
+        ] = None,
     ) -> dict[str, Any]:
         async with await _project_lock(project_id):
             try:
                 return _to_payload(
-                    await asyncio.to_thread(controller.end_mission, project_id)
+                    await asyncio.to_thread(
+                        controller.end_mission, project_id, deliverable_roots
+                    )
                 )
             except ToolError as exc:
                 return _to_payload(exc)

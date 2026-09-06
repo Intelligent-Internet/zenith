@@ -33,6 +33,7 @@ from .models import (
     ProjectState,
     TaskList,
     TaskStateFile,
+    TerminalReviewConfig,
     TerminalReviewHandoff,
     ValidateHandoff,
     WorkHandoff,
@@ -73,6 +74,24 @@ def atomic_write_json(path: str | Path, payload: object) -> None:
     atomic_write_text(
         path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     )
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _symlink_components(path: Path) -> list[Path]:
+    components: list[Path] = []
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            components.append(current)
+    return components
 
 
 def attempt_to_markdown(handoff: WorkHandoff | ValidateHandoff) -> str:
@@ -619,6 +638,153 @@ class ProjectStore:
     ) -> Path:
         """Agent-readable markdown mirror."""
         return self.terminal_reviews_dir(project_id, mission_id) / f"{spawn_ts}.md"
+
+    def terminal_review_config_path(self, project_id: str, mission_id: str) -> Path:
+        return self.mission_runtime_dir(project_id, mission_id) / "terminal-review-config.json"
+
+    def load_terminal_review_config(
+        self, project_id: str, mission_id: str
+    ) -> TerminalReviewConfig:
+        path = self.terminal_review_config_path(project_id, mission_id)
+        if not path.exists():
+            return TerminalReviewConfig()
+        return TerminalReviewConfig.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def save_terminal_review_config(
+        self, project_id: str, mission_id: str, config: TerminalReviewConfig
+    ) -> Path:
+        path = self.terminal_review_config_path(project_id, mission_id)
+        atomic_write_json(path, config.model_dump(mode="json"))
+        return path
+
+    def resolve_terminal_review_roots(
+        self, project_id: str, mission_id: str, roots: list[str]
+    ) -> list[str]:
+        workspace = self.workspace_dir(project_id).resolve()
+        mission = self.mission_dir(project_id, mission_id).resolve()
+        evidence = mission / "evidence"
+        projects = self.config.projects_dir.resolve()
+        forbidden_workspace = [
+            projects,
+            workspace / ".git",
+            workspace / ".zenith",
+            workspace / ".zenith-runtime",
+            workspace / ".agents",
+            workspace / ".claude",
+            workspace / ".codex",
+            workspace / "AGENTS.md",
+        ]
+        resolved: list[str] = []
+        for raw in roots:
+            if any(ord(char) < 32 or ord(char) == 127 for char in raw):
+                raise ValueError("terminal-review deliverable path contains control characters")
+            lexical_candidate = Path(raw).expanduser()
+            if not lexical_candidate.is_absolute():
+                lexical_candidate = workspace / lexical_candidate
+            lexical_candidate = Path(os.path.abspath(lexical_candidate))
+            try:
+                candidate = lexical_candidate.resolve(strict=True)
+            except FileNotFoundError as exc:
+                raise ValueError(f"terminal-review deliverable does not exist: {raw}") from exc
+            except (OSError, RuntimeError) as exc:
+                raise ValueError(
+                    f"terminal-review deliverable cannot be resolved safely: {raw}"
+                ) from exc
+            if any(ord(char) < 32 or ord(char) == 127 for char in str(candidate)):
+                raise ValueError("terminal-review deliverable path contains control characters")
+
+            # Ancestor aliases outside an allowed surface are path spellings, such
+            # as macOS /var -> /private/var. A symlink originating inside an
+            # authorization or control surface must not cross that boundary.
+            for link in _symlink_components(lexical_candidate):
+                try:
+                    link_location = link.parent.resolve(strict=True) / link.name
+                    link_target = link.resolve(strict=True)
+                except FileNotFoundError as exc:
+                    raise ValueError(
+                        f"terminal-review deliverable contains a broken symlink: {link}"
+                    ) from exc
+                except (OSError, RuntimeError) as exc:
+                    raise ValueError(
+                        f"terminal-review deliverable contains an unsafe symlink: {link}"
+                    ) from exc
+                in_forbidden_workspace = any(
+                    link_location == item or _is_relative_to(link_location, item)
+                    for item in forbidden_workspace[1:]
+                )
+                in_project_control = _is_relative_to(
+                    link_location, projects
+                ) and not _is_relative_to(link_location, evidence)
+                crosses_workspace_surface = (
+                    _is_relative_to(link_location, workspace)
+                    and not _is_relative_to(link_location, projects)
+                    and not (
+                        _is_relative_to(link_target, workspace)
+                        and not _is_relative_to(link_target, projects)
+                    )
+                )
+                crosses_mission_surface = _is_relative_to(
+                    link_location, mission
+                ) and not (
+                    _is_relative_to(link_location, evidence)
+                    and _is_relative_to(link_target, evidence)
+                )
+                if (
+                    in_forbidden_workspace
+                    or in_project_control
+                    or crosses_mission_surface
+                    or crosses_workspace_surface
+                ):
+                    raise ValueError(
+                        "terminal-review deliverable must be inside the normal workspace "
+                        f"product surface or current mission evidence subtree: {raw}"
+                    )
+
+            in_evidence = _is_relative_to(candidate, evidence)
+            in_workspace = (
+                _is_relative_to(candidate, workspace)
+                and not _is_relative_to(candidate, projects)
+            )
+            if not (in_evidence or in_workspace):
+                raise ValueError(
+                    "terminal-review deliverable must be inside the normal workspace "
+                    f"product surface or current mission evidence subtree: {raw}"
+                )
+            if in_workspace:
+                for item in forbidden_workspace:
+                    if (
+                        candidate == item
+                        or _is_relative_to(candidate, item)
+                        or (candidate.is_dir() and _is_relative_to(item, candidate))
+                    ):
+                        raise ValueError(
+                            "terminal-review deliverable is a forbidden workspace "
+                            f"artifact: {raw}"
+                        )
+            if candidate.is_dir():
+                for nested in candidate.rglob("*"):
+                    if not nested.is_symlink():
+                        continue
+                    try:
+                        link_target = nested.resolve(strict=True)
+                    except FileNotFoundError as exc:
+                        raise ValueError(
+                            f"terminal-review deliverable contains a broken symlink: {nested}"
+                        ) from exc
+                    except (OSError, RuntimeError) as exc:
+                        raise ValueError(
+                            "terminal-review deliverable contains an unsafe symlink: "
+                            f"{nested}"
+                        ) from exc
+                    if not _is_relative_to(link_target, candidate):
+                        raise ValueError(
+                            "terminal-review deliverable contains a symlink outside its "
+                            f"declared root: {nested}"
+                        )
+            value = str(candidate)
+            if value not in resolved:
+                resolved.append(value)
+        return sorted(resolved)
 
     def save_terminal_review(
         self,

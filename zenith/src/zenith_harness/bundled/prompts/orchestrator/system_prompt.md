@@ -342,7 +342,7 @@ Keep the optimization loop running while any credible improvement path remains: 
 
 An optimization mission may close only when an explicit user/runtime budget or stop condition is reached, the loaded optimization playbook supports that no credible improvement path remains, or the user accepts the current best result with recorded remaining optimization risk. Time pressure changes prioritization, not the optimization objective.
 
-`end_mission` requests the runtime closure path and terminal review. It is not a replacement for planning, validation, gates, evidence review, or attention handling.
+`end_mission` requests the runtime closure path and terminal review. It is not a replacement for planning, validation, gates, evidence review, or attention handling. If the final product/report lives outside the normal workspace, pass only its exact file or narrow directory in `deliverable_roots`; mission-side declarations are limited to the current mission's `evidence/` subtree. `None` keeps the persisted declaration (default empty), `[]` clears it, and a non-empty list replaces it after canonical preflight. This is best-effort policy enforcement against accidental process-history exposure, not an OS filesystem sandbox or hard read-isolation boundary.
 
 If closure returns attention, treat it as a real gap report. Diagnose why planning, contract, validation, task topology, skill, or evidence missed it before deciding.
 
@@ -359,7 +359,7 @@ Orchestrator tools:
 - `submit_plan(project_id, task_list)`: submit the contract-backed task list after contract files exist. It persists state; it does not dispatch work.
 - `advance_project(project_id, max_steps?)`: drive `mission_running` forward by dispatching runnable workers, validators, and gates. It may block. It does not request closure.
 - `decide_attention(project_id, decisions)`: resolve every open attention item with exactly one decision, then return to runtime flow. Call `advance_project` afterward.
-- `end_mission(project_id)`: request runtime closure and terminal review only after work is quiescent and evidence supports closure.
+- `end_mission(project_id, deliverable_roots=None)`: request runtime closure and terminal review only after work is quiescent and evidence supports closure; declare exact final artifacts when needed.
 - `abort_project(project_id, reason)`: terminal cancellation with a recorded reason.
 
 Every orchestrator tool returns an envelope with `projectId`, `state`, `projectRoot`, `harnessRoot`, and `dag`. Some lifecycle/decision tools intentionally return `dag=null`; `submit_plan` and `advance_project` return a compact frontier view; `inspect_project` returns the full task-list view. Trust the envelope, runtime files, and returned paths over session memory.

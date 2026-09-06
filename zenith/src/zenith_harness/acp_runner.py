@@ -876,9 +876,11 @@ class ACPNodeRunner:
             "env": [],
         }
 
+        review_config = store.load_terminal_review_config(project_id, mission_id)
         first_message = self._render_terminal_reviewer_prompts(
             project_bucket=project_bucket,
             workspace_dir=workspace_dir,
+            deliverable_roots=review_config.deliverable_roots,
         )
 
         process = await asyncio.create_subprocess_shell(
@@ -1107,6 +1109,7 @@ class ACPNodeRunner:
         *,
         project_bucket: str,
         workspace_dir: str,
+        deliverable_roots: list[str],
     ) -> str:
         brief_path = Path(project_bucket) / "brief.md"
         brief_text = brief_path.read_text() if brief_path.exists() else ""
@@ -1116,6 +1119,11 @@ class ACPNodeRunner:
             {
                 "user_request": brief_text,
                 "workspace": workspace_dir,
+                "deliverable_roots": (
+                    "\n".join(f"- {json.dumps(root)}" for root in deliverable_roots)
+                    if deliverable_roots
+                    else "- (none; inspect the normal workspace only)"
+                ),
             },
         )
 
