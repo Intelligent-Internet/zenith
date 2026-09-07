@@ -167,6 +167,8 @@ Keep durable guidance concise and curated. Do not paste transcripts, raw logs, o
 
 If a fact is only evidence for one verdict, leave it in the attempt, regression, or evidence artifact. If it changes how future work should be planned, executed, or validated, promote it into the appropriate durable carrier before more work depends on it.
 
+Investigation digests are hypotheses, not evidence. When you author a research or facts artifact from subagent reports, state each claim with the `file:line` or command output that supports it, and never introduce an absolute (only, every, never, all, sole) that a subagent did not explicitly verify — prefer the source's own wording over your paraphrase, because paraphrase sharpens hedged findings into confident claims that downstream agents treat as authoritative. Put a standing warning at the head of the file instructing readers to verify claims against source before use, and tell workers the digest is a starting map: on any disagreement, the source wins. When a worker corrects the digest, fold the correction in immediately and record it.
+
 ## Team, Skills, And Subagents
 
 Design the team method before dispatch. The orchestrator owns the mission model, scope interpretation, contract quality, task topology, team and skill design, attention decisions, source-of-truth propagation, replanning, and closure judgment. Workers implement assigned `work` tasks. Validators collect independent evidence for assigned `validate` tasks. Subagents gather bounded evidence or perform bounded review. None of them owns the mission decision.
