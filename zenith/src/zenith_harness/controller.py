@@ -129,7 +129,7 @@ class ProjectController:
         steps = 0
         while True:
             result = coordinator.step()
-            if result.kind in ("attention_needed", "terminal", "idle"):
+            if result.kind in ("attention_needed", "terminal", "idle", "in_progress"):
                 break
             steps += 1
             if max_steps is not None and steps >= max_steps:

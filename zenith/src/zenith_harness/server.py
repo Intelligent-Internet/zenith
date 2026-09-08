@@ -174,13 +174,17 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
     @mcp.tool(
         name="advance_project",
         description=(
-            "Drive the runtime forward. BLOCKING — may run for many minutes while "
-            "workers dispatch according to runtime scheduling. "
-            "Call whenever state is mission_running. "
-            "Returns when attention is needed, no runnable task work remains, or "
-            "`max_steps` exhausts. It does not request mission closure; call "
-            "end_mission when you intend to close after task work is quiescent. "
-            "If it returns still mission_running with runnable work, call it again."
+            "Drive the runtime forward. BOUNDED — dispatches runnable work, then "
+            "waits at most `dispatch_wait_s` (default 50s, ZENITH_DISPATCH_WAIT_S) "
+            "for handoffs before returning; it NEVER holds the call for a whole "
+            "worker run (workers write their own handoff files; the next call "
+            "reconciles them). Call whenever state is mission_running. "
+            "Returns when attention is needed, workers are in flight "
+            "(in_progress), no runnable task work remains, or `max_steps` "
+            "exhausts. It does not request mission closure; call end_mission "
+            "when you intend to close after task work is quiescent. "
+            "If it returns still mission_running with runnable or running work, "
+            "call it again."
         ),
     )
     async def advance_project(
