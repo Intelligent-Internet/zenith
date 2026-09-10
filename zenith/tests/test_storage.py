@@ -120,6 +120,214 @@ class TestProjectLifecycle:
         )
         assert (skills_dir / "scrutiny-validator" / "SKILL.md").exists()
 
+    def test_relative_symlinked_workspace_skill_is_materialized(
+        self, store: ProjectStore, workspace: Path
+    ) -> None:
+        source = workspace / "shared-skills" / "shared-skill" / "SKILL.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Shared skill\n")
+        linked = workspace / ".agents" / "skills" / "shared-skill"
+        linked.parent.mkdir(parents=True)
+        linked.symlink_to(Path("../../shared-skills/shared-skill"))
+        imported = store.zenith_dir("p1") / "skills" / "shared-skill"
+        imported.parent.mkdir(parents=True)
+        imported.symlink_to(Path("../missing-shared-skill"))
+
+        store.create_project("brief", workspace, project_id="p1")
+
+        assert imported.is_dir()
+        assert not imported.is_symlink()
+        assert (imported / "SKILL.md").read_text() == "# Shared skill\n"
+
+        store.create_project("brief", workspace, project_id="p1")
+        assert (imported / "SKILL.md").read_text() == "# Shared skill\n"
+
+    @pytest.mark.parametrize("kind", ["file", "directory", "dangling", "cycle"])
+    def test_out_of_workspace_skill_symlink_is_not_imported(
+        self, store: ProjectStore, workspace: Path, tmp_path: Path, kind: str
+    ) -> None:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        linked = workspace / ".agents" / "skills" / "external-skill"
+        linked.parent.mkdir(parents=True)
+        if kind == "file":
+            target = outside / "SKILL.md"
+            target.write_text("private\n")
+        elif kind == "directory":
+            target = outside / "external-skill"
+            target.mkdir()
+            (target / "SKILL.md").write_text("private\n")
+        elif kind == "dangling":
+            target = outside / "missing"
+        else:
+            target = outside / "cycle"
+            target.symlink_to(target)
+        linked.symlink_to(target)
+
+        store.create_project("brief", workspace, project_id="p1")
+
+        assert not (store.zenith_dir("p1") / "skills" / "external-skill").exists()
+
+    def test_nested_external_and_cyclic_skill_links_are_skipped(
+        self, store: ProjectStore, workspace: Path, tmp_path: Path
+    ) -> None:
+        source = workspace / "shared-skills" / "shared-skill"
+        source.mkdir(parents=True)
+        (source / "SKILL.md").write_text("# Shared skill\n")
+        outside = tmp_path / "outside-secret"
+        outside.write_text("private\n")
+        (source / "external").symlink_to(outside)
+        (source / "cycle").symlink_to(source)
+        linked = workspace / ".agents" / "skills" / "shared-skill"
+        linked.parent.mkdir(parents=True)
+        linked.symlink_to(Path("../../shared-skills/shared-skill"))
+
+        store.create_project("brief", workspace, project_id="p1")
+
+        imported = store.zenith_dir("p1") / "skills" / "shared-skill"
+        assert (imported / "SKILL.md").read_text() == "# Shared skill\n"
+        assert not (imported / "external").exists()
+        assert not (imported / "cycle").exists()
+
+    def test_symlinked_host_directory_is_ignored(
+        self, store: ProjectStore, workspace: Path, tmp_path: Path
+    ) -> None:
+        outside_host = tmp_path / "outside-agent"
+        skill = outside_host / "skills" / "external-skill" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("private\n")
+        (workspace / ".agents").symlink_to(outside_host)
+
+        store.create_project("brief", workspace, project_id="p1")
+
+        imported = store.zenith_dir("p1") / "skills" / "external-skill"
+        assert not imported.exists()
+        assert list((outside_host / "skills").iterdir()) == [skill.parent]
+
+    def test_existing_destination_symlink_cannot_redirect_skill_copy(
+        self, store: ProjectStore, workspace: Path, tmp_path: Path
+    ) -> None:
+        source = workspace / ".agents" / "skills" / "shared-skill" / "SKILL.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Shared skill\n")
+        outside = tmp_path / "outside-destination"
+        outside.mkdir()
+        imported = store.zenith_dir("p1") / "skills" / "shared-skill"
+        imported.parent.mkdir(parents=True)
+        imported.symlink_to(outside)
+
+        store.create_project("brief", workspace, project_id="p1")
+
+        assert imported.is_dir()
+        assert not imported.is_symlink()
+        assert (imported / "SKILL.md").read_text() == "# Shared skill\n"
+        assert not (outside / "SKILL.md").exists()
+
+    def test_destination_root_symlink_is_replaced_before_skill_copy(
+        self, store: ProjectStore, workspace: Path, tmp_path: Path
+    ) -> None:
+        source = workspace / ".agents" / "skills" / "shared-skill" / "SKILL.md"
+        source.parent.mkdir(parents=True)
+        source.write_text("# Shared skill\n")
+        outside = tmp_path / "outside-root"
+        outside.mkdir()
+        skills_root = store.zenith_dir("p1") / "skills"
+        skills_root.parent.mkdir(parents=True)
+        skills_root.symlink_to(outside)
+
+        store.create_project("brief", workspace, project_id="p1")
+
+        assert skills_root.is_dir()
+        assert not skills_root.is_symlink()
+        assert (skills_root / "shared-skill" / "SKILL.md").read_text() == (
+            "# Shared skill\n"
+        )
+        assert not (outside / "shared-skill").exists()
+
+    def test_sync_replaces_destination_root_symlink(
+        self, store: ProjectStore, workspace: Path, tmp_path: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        skills_root = store.zenith_dir("p1") / "skills"
+        parked = skills_root.with_name("skills-parked")
+        skills_root.rename(parked)
+        outside = tmp_path / "outside-sync-root"
+        outside.mkdir()
+        skills_root.symlink_to(outside)
+
+        store.sync_workspace_skill_surfaces("p1")
+
+        assert skills_root.is_dir()
+        assert not skills_root.is_symlink()
+        assert not any(outside.iterdir())
+
+    def test_create_rejects_symlinked_project_bucket(
+        self, store: ProjectStore, workspace: Path, tmp_path: Path
+    ) -> None:
+        projects = store.config.projects_dir
+        projects.mkdir(parents=True)
+        outside = tmp_path / "outside-project"
+        outside.mkdir()
+        (projects / "p1").symlink_to(outside)
+
+        with pytest.raises(ValueError, match="symlinked project path"):
+            store.create_project("brief", workspace, project_id="p1")
+
+        assert not any(outside.iterdir())
+
+    def test_sync_rejects_symlinked_zenith_directory(
+        self, store: ProjectStore, workspace: Path, tmp_path: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        zenith = store.zenith_dir("p1")
+        zenith.rename(zenith.with_name(".zenith-parked"))
+        outside = tmp_path / "outside-zenith"
+        outside.mkdir()
+        zenith.symlink_to(outside)
+
+        with pytest.raises(ValueError, match="symlinked project path"):
+            store.sync_workspace_skill_surfaces("p1")
+
+        assert not any(outside.iterdir())
+
+    def test_sync_replaces_bundled_skill_directory_symlink(
+        self, store: ProjectStore, workspace: Path, tmp_path: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        skill_dir = store.zenith_dir("p1") / "skills" / "scrutiny-validator"
+        parked = skill_dir.with_name("scrutiny-validator-parked")
+        skill_dir.rename(parked)
+        outside = tmp_path / "outside-skill"
+        outside.mkdir()
+        skill_dir.symlink_to(outside)
+
+        store.sync_workspace_skill_surfaces("p1")
+
+        assert skill_dir.is_dir()
+        assert not skill_dir.is_symlink()
+        assert (skill_dir / "SKILL.md").is_file()
+        assert not (outside / "SKILL.md").exists()
+
+    def test_sync_replaces_bundled_skill_file_symlink(
+        self, store: ProjectStore, workspace: Path, tmp_path: Path
+    ) -> None:
+        store.create_project("brief", workspace, project_id="p1")
+        skill_file = (
+            store.zenith_dir("p1")
+            / "skills"
+            / "scrutiny-validator"
+            / "SKILL.md"
+        )
+        skill_file.unlink()
+        outside = tmp_path / "outside-SKILL.md"
+        skill_file.symlink_to(outside)
+
+        store.sync_workspace_skill_surfaces("p1")
+
+        assert skill_file.is_file()
+        assert not skill_file.is_symlink()
+        assert not outside.exists()
+
     def test_sync_workspace_skill_surfaces_updates_preserved_host_dir(
         self, store: ProjectStore, workspace: Path
     ) -> None:

@@ -137,13 +137,31 @@ class ProjectStore:
     # ------------------------------------------------------------------
 
     def bucket_root(self, project_id: str) -> Path:
-        return self.config.bucket_root(project_id)
+        return self._project_path(project_id)
 
     def zenith_dir(self, project_id: str) -> Path:
-        return self.config.zenith_dir(project_id)
+        return self._project_path(project_id, ".zenith")
 
     def zenith_runtime_dir(self, project_id: str) -> Path:
-        return self.config.zenith_runtime_dir(project_id)
+        return self._project_path(project_id, ".zenith-runtime")
+
+    def _project_path(self, project_id: str, *parts: str) -> Path:
+        if not project_id or Path(project_id).name != project_id:
+            raise ValueError(f"invalid project_id: {project_id!r}")
+        root = self.config.projects_dir.expanduser().resolve()
+        candidate = root / project_id
+        for part in parts:
+            candidate /= part
+        current = root
+        for part in candidate.relative_to(root).parts:
+            current /= part
+            if current.is_symlink():
+                raise ValueError(f"symlinked project path is not allowed: {current}")
+        try:
+            candidate.resolve(strict=False).relative_to(root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError(f"project path escapes projects_dir: {candidate}") from exc
+        return candidate
 
     def workspace_dir(self, project_id: str) -> Path:
         return Path(self.load_project(project_id).workspace_dir)
@@ -184,7 +202,7 @@ class ProjectStore:
         # 1) Durable layout (.zenith/)
         zenith.mkdir(parents=True, exist_ok=True)
         (zenith / "decisions").mkdir(parents=True, exist_ok=True)
-        (zenith / "skills").mkdir(parents=True, exist_ok=True)
+        skills = self._ensure_real_skills_dir(zenith / "skills")
         (zenith / "missions").mkdir(parents=True, exist_ok=True)
 
         # 2) Cursor layout (.zenith-runtime/)
@@ -217,8 +235,8 @@ class ProjectStore:
         # 6) Import existing repo-native host skills, then seed bundled skills
         #    into the bucket so host-agent native
         #    discovery via the workspace shim has content from day one.
-        self._import_workspace_skills(ws, zenith / "skills")
-        self._seed_bundled_skills(zenith / "skills")
+        self._import_workspace_skills(ws, skills)
+        self._seed_bundled_skills(skills)
 
         # 7) Workspace symlink shims (host-agent native discovery surface).
         self._ensure_symlink_shims(ws, zenith)
@@ -254,7 +272,7 @@ class ProjectStore:
         record = self.load_project(project_id)
         ws = Path(record.workspace_dir).expanduser().resolve()
         zenith = self.zenith_dir(project_id)
-        target_skills = zenith / "skills"
+        target_skills = self._ensure_real_skills_dir(zenith / "skills")
         self._import_workspace_skills(ws, target_skills)
         self._seed_bundled_skills(target_skills)
         self._ensure_symlink_shims(ws, zenith)
@@ -678,6 +696,8 @@ class ProjectStore:
         target_skills.mkdir(parents=True, exist_ok=True)
         for host in (".agents", ".claude", ".codex"):
             host_dir = workspace / host
+            if host_dir.is_symlink():
+                continue
             host_dir.mkdir(parents=True, exist_ok=True)
             self._ensure_skills_surface(host_dir / "skills", target_skills)
         self._ensure_agents_surface(workspace / "AGENTS.md", target_agents_md)
@@ -756,17 +776,30 @@ class ProjectStore:
     def _import_workspace_skills(self, workspace: Path, target: Path) -> None:
         target.mkdir(parents=True, exist_ok=True)
         for host in (".agents", ".claude", ".codex"):
-            source = workspace / host / "skills"
+            host_dir = workspace / host
+            if host_dir.is_symlink():
+                continue
+            source = host_dir / "skills"
             if source.is_dir() and not source.is_symlink():
                 self._copy_missing_tree(source, target)
+
+    @staticmethod
+    def _ensure_real_skills_dir(path: Path) -> Path:
+        if path.is_symlink():
+            path.unlink()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def _seed_bundled_skills(self, target: Path) -> None:
         """Copy bundled `SKILL.md` files into the bucket if not already
         present. Idempotent and non-overwriting per skill."""
+        if target.is_symlink():
+            return
         bundled_skills = self.config.bundled_dir / "skills"
         if not bundled_skills.exists():
             return
         target.mkdir(parents=True, exist_ok=True)
+        target_root = target.resolve()
         for skill_dir in sorted(bundled_skills.iterdir()):
             if not skill_dir.is_dir():
                 continue
@@ -775,27 +808,114 @@ class ProjectStore:
                 continue
             dest_dir = target / skill_dir.name
             dest = dest_dir / "SKILL.md"
-            if dest.exists():
+            if dest_dir.is_symlink():
+                dest_dir.unlink()
+            if os.path.lexists(dest):
+                if dest.is_symlink():
+                    dest.unlink()
+                else:
+                    continue
+            if os.path.lexists(dest_dir) and not dest_dir.is_dir():
                 continue
             dest_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                dest_dir.resolve(strict=True).relative_to(target_root)
+            except (OSError, RuntimeError, ValueError):
+                continue
             shutil.copy2(src, dest)
 
     @staticmethod
     def _copy_missing_tree(source: Path, target: Path) -> None:
-        if not source.is_dir():
+        if not source.is_dir() or target.is_symlink():
             return
+        allowed_root = source.parents[1].resolve()
+        try:
+            source.resolve(strict=True).relative_to(allowed_root)
+        except (FileNotFoundError, OSError, RuntimeError, ValueError):
+            return
+        target_root = target.resolve()
         for src in sorted(source.rglob("*")):
+            try:
+                resolved_src = src.resolve(strict=True)
+                resolved_src.relative_to(allowed_root)
+            except (FileNotFoundError, OSError, RuntimeError, ValueError):
+                continue
             rel = src.relative_to(source)
             dest = target / rel
             if os.path.lexists(dest):
-                continue
+                if dest.is_symlink():
+                    dest.unlink()
+                else:
+                    continue
             dest.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                dest.parent.resolve().relative_to(target_root)
+            except (OSError, RuntimeError, ValueError):
+                continue
             if src.is_symlink():
-                dest.symlink_to(os.readlink(src))
+                try:
+                    resolved_src.relative_to(allowed_root)
+                except ValueError:
+                    continue
+                if resolved_src.is_dir():
+                    ProjectStore._copy_resolved_tree(
+                        resolved_src, dest, allowed_root, target_root, set()
+                    )
+                elif resolved_src.is_file():
+                    shutil.copy2(resolved_src, dest)
             elif src.is_dir():
                 dest.mkdir(parents=True, exist_ok=True)
             elif src.is_file():
                 shutil.copy2(src, dest)
+
+    @staticmethod
+    def _copy_resolved_tree(
+        source: Path,
+        target: Path,
+        allowed_root: Path,
+        target_root: Path,
+        visited: set[Path],
+    ) -> None:
+        try:
+            resolved_source = source.resolve(strict=True)
+            resolved_source.relative_to(allowed_root)
+        except (FileNotFoundError, OSError, RuntimeError, ValueError):
+            return
+        if resolved_source in visited:
+            return
+        visited.add(resolved_source)
+        if os.path.lexists(target) and target.is_symlink():
+            target.unlink()
+        try:
+            target.parent.resolve().relative_to(target_root)
+        except (OSError, RuntimeError, ValueError):
+            return
+        target.mkdir(parents=True, exist_ok=True)
+        for child in sorted(resolved_source.iterdir()):
+            destination = target / child.name
+            try:
+                resolved_child = child.resolve(strict=True)
+                resolved_child.relative_to(allowed_root)
+            except (FileNotFoundError, OSError, RuntimeError, ValueError):
+                continue
+            if resolved_child.is_dir():
+                if os.path.lexists(destination) and destination.is_symlink():
+                    destination.unlink()
+                ProjectStore._copy_resolved_tree(
+                    resolved_child,
+                    destination,
+                    allowed_root,
+                    target_root,
+                    visited,
+                )
+            elif resolved_child.is_file():
+                if os.path.lexists(destination) and destination.is_symlink():
+                    destination.unlink()
+                try:
+                    destination.parent.resolve().relative_to(target_root)
+                except (OSError, RuntimeError, ValueError):
+                    continue
+                shutil.copy2(resolved_child, destination)
 
 
 __all__ = [

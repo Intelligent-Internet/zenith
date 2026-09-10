@@ -21,6 +21,10 @@ from .models import (
     ValidateHandoff,
     WorkHandoff,
 )
+from .runtime_identity import (
+    RuntimeIdentityRegistration,
+    _register_node_runtime_identity,
+)
 from .storage import (
     ProjectStore,
     atomic_write_json,
@@ -34,6 +38,8 @@ SUBPROCESS_STREAM_LIMIT = int(
         str(8 * 1024 * 1024),
     )
 )
+HANDOFF_REPAIR_TIMEOUT_SECONDS = 30.0
+ACP_STDERR_TAIL_BYTES = 64 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +116,9 @@ def _augment_acp_command(command: str, provider) -> str:
     return command
 
 
-def _acp_subprocess_env(provider) -> dict[str, str]:
+def _acp_subprocess_env(
+    provider, *, runtime_identity_environment: dict[str, str] | None = None
+) -> dict[str, str]:
     """Build the env handed to an ACP-agent subprocess.
 
     For codex we preserve PATH so node-based ACP adapters can launch via
@@ -121,11 +129,18 @@ def _acp_subprocess_env(provider) -> dict[str, str]:
     For hermes the env is passed through unchanged.
     """
     env = os.environ.copy()
+    for key in tuple(env):
+        if key.startswith("SELF_IMPROVEMENT_ZENITH_AUTHORITY_") or key == (
+            "SELF_IMPROVEMENT_ZENITH_ISSUER_STATE"
+        ):
+            env.pop(key, None)
     name = getattr(provider, "name", None)
     if name == "codex":
         # Env-var hints — harmless if codex ignores them.
         env["CODEX_SANDBOX"] = "danger-full-access"
         env["CODEX_DISABLE_SANDBOX"] = "1"
+    if runtime_identity_environment:
+        env.update(runtime_identity_environment)
     # hermes: no special env needed
     return env
 
@@ -177,20 +192,20 @@ async def _wait_for_process_exit(
 async def _drain_stream_chunks(stream: asyncio.StreamReader | None) -> str:
     if stream is None:
         return ""
-    chunks: list[str] = []
+    tail = bytearray()
     try:
         while True:
             chunk = await stream.read(4096)
             if not chunk:
                 break
-            text = chunk.decode("utf-8", errors="replace")
-            if text:
-                chunks.append(text)
+            tail.extend(chunk)
+            if len(tail) > ACP_STDERR_TAIL_BYTES:
+                del tail[: len(tail) - ACP_STDERR_TAIL_BYTES]
     except asyncio.CancelledError:
-        raise
+        pass
     except Exception:  # noqa: BLE001
-        return "".join(chunks)
-    return "".join(chunks)
+        pass
+    return bytes(tail).decode("utf-8", errors="replace")
 
 
 @dataclass
@@ -240,9 +255,12 @@ class ACPProgressTracker:
         if not msg or self.callback is None or msg == self.last_emitted:
             return
         self.last_emitted = msg
-        out = self.callback(f"Agent: {msg}")
-        if inspect.isawaitable(out):
-            await out
+        try:
+            out = self.callback(f"Agent: {msg}")
+            if inspect.isawaitable(out):
+                await out
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Progress callback failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -281,10 +299,15 @@ class ACPClient:
         self._pending[rid] = future
         try:
             await self._write(msg)
+            return await future
+        except asyncio.CancelledError:
+            self._pending.pop(rid, None)
+            if not future.done():
+                future.cancel()
+            raise
         except Exception:
             self._pending.pop(rid, None)
             raise
-        return await future
 
     async def _write(self, msg: dict[str, Any]) -> None:
         assert self._process.stdin is not None
@@ -540,6 +563,31 @@ class ACPNodeRunner:
     config: HarnessConfig
     loader: AssetLoader
 
+    def _register_runtime_identity(
+        self,
+        *,
+        store: ProjectStore,
+        project_id: str,
+        mission_id: str,
+        task: Task,
+        spawn_ts: str,
+        role: Literal["validator", "worker"],
+        workspace_dir: Path,
+    ) -> RuntimeIdentityRegistration:
+        role_config = self.config.for_role(role)
+        return _register_node_runtime_identity(
+            store=store,
+            project_id=project_id,
+            mission_id=mission_id,
+            task_id=task.id,
+            spawn_ts=spawn_ts,
+            executor=f"{role_config.worker_provider.name}-{role}",
+            provider=role_config.worker_provider.name,
+            task_type=task.type,
+            execution_role=role,
+            workspace_dir=workspace_dir,
+        )
+
     @staticmethod
     def _find_free_port() -> int:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -558,9 +606,7 @@ class ACPNodeRunner:
         progress_callback: ProgressCallback | None = None,
     ) -> NodeHandoff:
         """Spawn the worker MCP server + ACP agent; poll the attempt file; return the handoff."""
-        role: Literal["validator", "worker"] = (
-            "validator" if task.type == "validate" else "worker"
-        )
+        role: Literal["validator", "worker"] = "validator" if task.type == "validate" else "worker"
         role_config = self.config.for_role(role)
         acp_command = role_config.worker_acp_command or role_config.resolved_worker_acp_command
         if not acp_command:
@@ -569,7 +615,9 @@ class ACPNodeRunner:
             )
         acp_command = _augment_acp_command(acp_command, role_config.worker_provider)
 
-        workspace_dir = str(Path(cwd).expanduser().resolve() if cwd else store.workspace_dir(project_id))
+        workspace_dir = str(
+            Path(cwd).expanduser().resolve() if cwd else store.workspace_dir(project_id)
+        )
         project_bucket = str(store.zenith_dir(project_id))
         handoff_path = store.attempt_path(project_id, mission_id, spawn_ts, task.id)
         handoff_path.parent.mkdir(parents=True, exist_ok=True)
@@ -600,6 +648,45 @@ class ACPNodeRunner:
             return self._synthesize_missing_handoff(
                 task, summary="Worker MCP server failed to start"
             )
+        except asyncio.CancelledError:
+            if mcp_process.returncode is None:
+                mcp_process.terminate()
+            await asyncio.shield(_close_subprocess(mcp_process, timeout=5))
+            raise
+
+        async def _cleanup_setup_failure(
+            *,
+            registration: RuntimeIdentityRegistration | None = None,
+            process: asyncio.subprocess.Process | None = None,
+            client: ACPClient | None = None,
+        ) -> None:
+            if client is not None:
+                try:
+                    await asyncio.wait_for(
+                        client.cleanup(close_main_process=False),
+                        timeout=10,
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    logger.warning("Setup ACP client cleanup failed: %s", exc)
+            if process is not None:
+                try:
+                    await _close_subprocess(process, timeout=5)
+                except BaseException as exc:  # noqa: BLE001
+                    logger.warning("Setup ACP process cleanup failed: %s", exc)
+            if registration is not None:
+                try:
+                    registration.close()
+                except BaseException as exc:  # noqa: BLE001
+                    logger.warning("Setup runtime identity cleanup failed: %s", exc)
+            if mcp_process.returncode is None:
+                try:
+                    mcp_process.terminate()
+                except OSError:
+                    pass
+            try:
+                await _close_subprocess(mcp_process, timeout=5)
+            except BaseException as exc:  # noqa: BLE001
+                logger.warning("Setup worker MCP cleanup failed: %s", exc)
 
         worker_mcp_cfg = {
             "type": "http",
@@ -610,32 +697,71 @@ class ACPNodeRunner:
         }
 
         # 2) Render the prompt (system + template merged into one first message).
-        first_message = self._render_prompts(
-            task=task,
-            mission_id=mission_id,
-            project_bucket=project_bucket,
-            workspace_dir=workspace_dir,
-            store=store,
-            project_id=project_id,
-        )
+        identity_registration: RuntimeIdentityRegistration | None = None
+        try:
+            first_message = self._render_prompts(
+                task=task,
+                mission_id=mission_id,
+                project_bucket=project_bucket,
+                workspace_dir=workspace_dir,
+                store=store,
+                project_id=project_id,
+            )
 
-        # 3) Spawn the ACP agent.
-        process = await asyncio.create_subprocess_shell(
-            acp_command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=workspace_dir,
-            env=_acp_subprocess_env(role_config.worker_provider),
-            limit=SUBPROCESS_STREAM_LIMIT,
-        )
+            # 3) Spawn the ACP agent.
+            identity_registration = self._register_runtime_identity(
+                store=store,
+                project_id=project_id,
+                mission_id=mission_id,
+                task=task,
+                spawn_ts=spawn_ts,
+                role=role,
+                workspace_dir=Path(workspace_dir),
+            )
+        except BaseException:
+            await asyncio.shield(_cleanup_setup_failure())
+            raise
+        if identity_registration.endpoint is None or identity_registration.capability is None:
+            await asyncio.shield(_cleanup_setup_failure(registration=identity_registration))
+            return self._synthesize_missing_handoff(
+                task,
+                summary=(
+                    f"Runtime identity registration failed: {identity_registration.reason_code}"
+                ),
+            )
+        try:
+            process = await asyncio.create_subprocess_shell(
+                acp_command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=workspace_dir,
+                env=_acp_subprocess_env(
+                    role_config.worker_provider,
+                    runtime_identity_environment=identity_registration.environment(),
+                ),
+                limit=SUBPROCESS_STREAM_LIMIT,
+            )
+        except BaseException:
+            await asyncio.shield(_cleanup_setup_failure(registration=identity_registration))
+            raise
         progress_tracker = ACPProgressTracker(callback=progress_callback)
         client = ACPClient(
             process,
             workspace_dir,
             session_update_handler=progress_tracker.handle_session_update,
         )
-        await client.start()
+        try:
+            await client.start()
+        except BaseException:
+            await asyncio.shield(
+                _cleanup_setup_failure(
+                    registration=identity_registration,
+                    process=process,
+                    client=client,
+                )
+            )
+            raise
         prompt_stop_reason: str | None = None
         session_error: str | None = None
         worker_exit_code: int | None = None
@@ -673,36 +799,104 @@ class ACPNodeRunner:
                     prompt_stop_reason = sr
 
             # 4) Give the worker MCP server a short grace period to flush.
-            await self._poll_attempt_file(handoff_path, timeout=2.0)
+            handoff_written = await self._poll_attempt_file(handoff_path, timeout=2.0)
+            if task.type == "validate" and not handoff_written and prompt_stop_reason == "end_turn":
+                # Some ACP agents finish with a prose response despite the
+                # mandatory end_node instruction.  Keep the same session and
+                # give it one bounded protocol-repair turn so completed work is
+                # not discarded as a synthetic empty handoff.
+                try:
+                    repair_result = await asyncio.wait_for(
+                        client.send_request(
+                            "session/prompt",
+                            {
+                                "prompt": [
+                                    {
+                                        "type": "text",
+                                        "text": (
+                                            "Protocol repair: the previous turn ended "
+                                            "without calling the required zenith-worker "
+                                            "end_node tool. Do not redo, extend, or change "
+                                            "the completed validation. Call end_node exactly "
+                                            "once now using the result and evidence you "
+                                            "already gathered. Include one items entry for "
+                                            "every assigned target. If you cannot provide the "
+                                            "required handoff, call end_node with done=false "
+                                            "and request_attention=true. Do not return prose "
+                                            "before the tool call."
+                                        ),
+                                    }
+                                ],
+                                "sessionId": session_id,
+                            },
+                        ),
+                        timeout=HANDOFF_REPAIR_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise TimeoutError("validator end_node protocol repair timed out") from exc
+                if isinstance(repair_result, dict):
+                    repair_stop_reason = repair_result.get("stopReason")
+                    if isinstance(repair_stop_reason, str):
+                        prompt_stop_reason = repair_stop_reason
+                await self._poll_attempt_file(handoff_path, timeout=2.0)
         except Exception as exc:  # noqa: BLE001
             session_error = str(exc)
             logger.error("ACP session failed for node %s: %s", task.id, exc)
         finally:
-            await progress_tracker.flush()
-            if process.returncode is None:
+
+            async def _cleanup() -> None:
+                nonlocal worker_exit_code, worker_stderr
                 try:
-                    await asyncio.wait_for(process.wait(), timeout=0.5)
+                    await asyncio.wait_for(progress_tracker.flush(), timeout=5)
+                except BaseException as exc:  # noqa: BLE001
+                    logger.warning("Progress flush cleanup failed: %s", exc)
+                try:
+                    await asyncio.wait_for(
+                        client.cleanup(close_main_process=False),
+                        timeout=10,
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    logger.warning("ACP client cleanup failed: %s", exc)
+                try:
+                    await _close_subprocess(process, timeout=5)
+                except BaseException as exc:  # noqa: BLE001
+                    logger.warning("ACP process cleanup failed: %s", exc)
+                worker_exit_code = process.returncode
+                try:
+                    worker_stderr = _truncate_text(
+                        await asyncio.wait_for(stderr_task, timeout=1),
+                        limit=2000,
+                    )
                 except asyncio.TimeoutError:
+                    stderr_task.cancel()
                     try:
-                        process.terminate()
+                        worker_stderr = _truncate_text(
+                            await stderr_task,
+                            limit=2000,
+                        )
+                    except BaseException:  # noqa: BLE001
+                        worker_stderr = ""
+                except BaseException:  # noqa: BLE001
+                    worker_stderr = ""
+                if mcp_process.returncode is None:
+                    try:
+                        mcp_process.terminate()
                     except OSError:
                         pass
-            await _wait_for_process_exit(process, timeout=5)
-            worker_exit_code = process.returncode
-            try:
-                worker_stderr = _truncate_text(
-                    await asyncio.wait_for(stderr_task, timeout=0.5), limit=2000
-                )
-            except (asyncio.TimeoutError, Exception):
-                worker_stderr = ""
-            await client.cleanup(close_main_process=False)
-            await _close_subprocess(process, timeout=0)
-            if mcp_process.returncode is None:
                 try:
-                    mcp_process.terminate()
-                except OSError:
-                    pass
-            await _close_subprocess(mcp_process, timeout=5)
+                    await _close_subprocess(mcp_process, timeout=5)
+                except BaseException as exc:  # noqa: BLE001
+                    logger.warning("Worker MCP cleanup failed: %s", exc)
+                try:
+                    identity_registration.close()
+                except BaseException as exc:  # noqa: BLE001
+                    logger.warning("Runtime identity cleanup failed: %s", exc)
+
+            cleanup_task = asyncio.create_task(_cleanup())
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                await cleanup_task
 
         # 5) Parse and return.
         if handoff_path.exists():
@@ -730,8 +924,7 @@ class ACPNodeRunner:
         acp_command = role_config.worker_acp_command
         if not acp_command:
             raise RuntimeError(
-                "No ACP command for terminal reviewer. "
-                "Set ZENITH_TERMINAL_REVIEWER_ACP_COMMAND."
+                "No ACP command for terminal reviewer. Set ZENITH_TERMINAL_REVIEWER_ACP_COMMAND."
             )
         acp_command = _augment_acp_command(acp_command, role_config.worker_provider)
 
@@ -751,51 +944,87 @@ class ACPNodeRunner:
             workspace_dir=workspace_dir,
             mcp_port=mcp_port,
         )
-        try:
-            await self._wait_for_server_ready("127.0.0.1", mcp_port)
-        except TimeoutError:
+        process: asyncio.subprocess.Process | None = None
+        tracker: ACPProgressTracker | None = None
+        client: ACPClient | None = None
+        stderr_task: asyncio.Task[str] | None = None
+
+        async def _cleanup() -> None:
+            if tracker is not None:
+                try:
+                    await asyncio.wait_for(tracker.flush(), timeout=5)
+                except BaseException as exc:  # noqa: BLE001
+                    logger.warning("Terminal progress flush cleanup failed: %s", exc)
+            if client is not None:
+                try:
+                    await asyncio.wait_for(
+                        client.cleanup(close_main_process=False),
+                        timeout=10,
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    logger.warning("Terminal ACP client cleanup failed: %s", exc)
+            if process is not None:
+                try:
+                    await _close_subprocess(process, timeout=5)
+                except BaseException as exc:  # noqa: BLE001
+                    logger.warning("Terminal ACP process cleanup failed: %s", exc)
+            if stderr_task is not None:
+                try:
+                    await asyncio.wait_for(stderr_task, timeout=1)
+                except asyncio.TimeoutError:
+                    stderr_task.cancel()
+                    try:
+                        await stderr_task
+                    except BaseException:  # noqa: BLE001
+                        pass
+                except BaseException:  # noqa: BLE001
+                    pass
             if mcp_process.returncode is None:
-                mcp_process.terminate()
-            await _close_subprocess(mcp_process, timeout=5)
-            raise RuntimeError(
-                "Terminal reviewer MCP server failed to start; cannot run terminal review"
-            )
+                try:
+                    mcp_process.terminate()
+                except OSError:
+                    pass
+            try:
+                await _close_subprocess(mcp_process, timeout=5)
+            except BaseException as exc:  # noqa: BLE001
+                logger.warning("Terminal MCP cleanup failed: %s", exc)
 
-        worker_mcp_cfg = {
-            "type": "http",
-            "name": "zenith-terminal-reviewer",
-            "url": f"http://127.0.0.1:{mcp_port}/mcp",
-            "headers": [],
-            "env": [],
-        }
-
-        first_message = self._render_terminal_reviewer_prompts(
-            project_bucket=project_bucket,
-            workspace_dir=workspace_dir,
-        )
-
-        process = await asyncio.create_subprocess_shell(
-            acp_command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=workspace_dir,
-            env=_acp_subprocess_env(role_config.worker_provider),
-            limit=SUBPROCESS_STREAM_LIMIT,
-        )
-        tracker = ACPProgressTracker(callback=progress_callback)
-        client = ACPClient(
-            process, workspace_dir, session_update_handler=tracker.handle_session_update
-        )
-        await client.start()
-        # Drain the reviewer subprocess's stderr continuously. Without this the
-        # OS stderr pipe (~64 KB) fills on a chatty reviewer (it reads the whole
-        # workspace and emits many tool calls), the child blocks on its stderr
-        # write, the ACP/stdout channel stalls, and the reviewer can never call
-        # submit_terminal_review -> spurious "terminal reviewer crashed". run_node
-        # already does this for workers; run_terminal_review omitted it.
-        stderr_task = asyncio.create_task(_drain_stream_chunks(process.stderr))
         try:
+            try:
+                await self._wait_for_server_ready("127.0.0.1", mcp_port)
+            except TimeoutError as exc:
+                raise RuntimeError(
+                    "Terminal reviewer MCP server failed to start; cannot run terminal review"
+                ) from exc
+
+            worker_mcp_cfg = {
+                "type": "http",
+                "name": "zenith-terminal-reviewer",
+                "url": f"http://127.0.0.1:{mcp_port}/mcp",
+                "headers": [],
+                "env": [],
+            }
+            first_message = self._render_terminal_reviewer_prompts(
+                project_bucket=project_bucket,
+                workspace_dir=workspace_dir,
+            )
+            process = await asyncio.create_subprocess_shell(
+                acp_command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=workspace_dir,
+                env=_acp_subprocess_env(role_config.worker_provider),
+                limit=SUBPROCESS_STREAM_LIMIT,
+            )
+            tracker = ACPProgressTracker(callback=progress_callback)
+            client = ACPClient(
+                process,
+                workspace_dir,
+                session_update_handler=tracker.handle_session_update,
+            )
+            await client.start()
+            stderr_task = asyncio.create_task(_drain_stream_chunks(process.stderr))
             await client.send_request(
                 "initialize",
                 {
@@ -824,25 +1053,11 @@ class ACPNodeRunner:
             )
             await self._poll_attempt_file(report_path, timeout=2.0)
         finally:
+            cleanup_task = asyncio.create_task(_cleanup())
             try:
-                stderr_task.cancel()
-            except Exception:  # noqa: BLE001
-                pass
-            await tracker.flush()
-            if process.returncode is None:
-                try:
-                    process.terminate()
-                except OSError:
-                    pass
-            await _wait_for_process_exit(process, timeout=5)
-            await client.cleanup(close_main_process=False)
-            await _close_subprocess(process, timeout=0)
-            if mcp_process.returncode is None:
-                try:
-                    mcp_process.terminate()
-                except OSError:
-                    pass
-            await _close_subprocess(mcp_process, timeout=5)
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                await cleanup_task
 
         if report_path.exists():
             return TerminalReviewHandoff.model_validate_json(report_path.read_text())
@@ -888,8 +1103,8 @@ class ACPNodeRunner:
         env["ZENITH_HANDOFF_PATH"] = handoff_path
         return await asyncio.create_subprocess_exec(
             *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
             cwd=workspace_dir,
             env=env,
             limit=SUBPROCESS_STREAM_LIMIT,
@@ -923,8 +1138,8 @@ class ACPNodeRunner:
         env["ZENITH_TERMINAL_REVIEW_PATH"] = report_path
         return await asyncio.create_subprocess_exec(
             *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
             cwd=workspace_dir,
             env=env,
             limit=SUBPROCESS_STREAM_LIMIT,
@@ -951,16 +1166,12 @@ class ACPNodeRunner:
                 return False
             await asyncio.sleep(0.1)
 
-    async def _maybe_set_mode(
-        self, client: ACPClient, session_id: str, provider
-    ) -> None:
+    async def _maybe_set_mode(self, client: ACPClient, session_id: str, provider) -> None:
         mode = getattr(provider, "acp_runtime_mode", None)
         if not mode:
             return
         try:
-            await client.send_request(
-                "session/set_mode", {"sessionId": session_id, "modeId": mode}
-            )
+            await client.send_request("session/set_mode", {"sessionId": session_id, "modeId": mode})
         except ACPError as exc:
             raise ACPError(
                 f"Failed to set ACP runtime mode {mode!r} for {provider.name}: {exc}"
@@ -1070,9 +1281,7 @@ class ACPNodeRunner:
             return ValidateHandoff.model_validate(data)
         return WorkHandoff.model_validate(data)
 
-    def _synthesize_missing_handoff(
-        self, task: Task, *, summary: str = ""
-    ) -> NodeHandoff:
+    def _synthesize_missing_handoff(self, task: Task, *, summary: str = "") -> NodeHandoff:
         report = summary or "Agent session ended without calling end_node."
         if task.type == "validate":
             return ValidateHandoff(
@@ -1196,9 +1405,7 @@ class ACPTerminalReviewer:
         self.loader = AssetLoader(config)
         self.runner = ACPNodeRunner(config=config, loader=self.loader)
 
-    def review(
-        self, project_id: str, mission_id: str, spawn_ts: str
-    ) -> TerminalReviewHandoff:
+    def review(self, project_id: str, mission_id: str, spawn_ts: str) -> TerminalReviewHandoff:
         return _run_coro_blocking(
             self.runner.run_terminal_review(
                 project_id=project_id,

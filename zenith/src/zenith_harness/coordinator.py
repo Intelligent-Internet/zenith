@@ -587,11 +587,11 @@ class MissionCoordinator:
         )
 
     def _upstream_validators(self, tl: TaskList, gate_id: str) -> list[str]:
-        """Transitive predecessors of `gate_id` that are validate tasks.
+        """Nearest validator frontier upstream of `gate_id`.
 
-        Patches rewrite `depends_on` in-place when they supersede/cancel,
-        so the gate's reachable chain never includes retired validators —
-        no status filtering needed here.
+        Traversal stops at each validator so a replacement validation wave does
+        not inherit dissent from the historical validators that triggered its
+        repair work.
         """
         by_id = {t.id: t for t in tl.tasks}
         gate = by_id.get(gate_id)
@@ -608,6 +608,7 @@ class MissionCoordinator:
             task = by_id[cur]
             if task.type == "validate":
                 result.append(cur)
+                continue
             stack.extend(task.depends_on)
         return result
 

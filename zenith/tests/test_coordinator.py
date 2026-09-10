@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from zenith_harness.config import HarnessConfig
+from zenith_harness.coordinator import MissionCoordinator
 from zenith_harness.controller import ProjectController, ToolError
 from zenith_harness.dispatcher import (
     DispatchRequest,
@@ -346,6 +347,41 @@ class TestValidatorDissentFailsGate:
         report = items[0].report
         assert "v-scrutiny: 1/1 passed" in report
         assert "v-user-surface: 1/1 passed" in report
+
+    def test_replacement_gate_ignores_validators_behind_current_validators(self) -> None:
+        task_list = TaskList(
+            tasks=[
+                _task("w-old", "work", ["VAL-001"]),
+                _task("v-old", "validate", ["VAL-001"], depends_on=["w-old"]),
+                _task("w-new", "work", ["VAL-001"], depends_on=["v-old"]),
+                _task("v-new", "validate", ["VAL-001"], depends_on=["w-new"]),
+                _task("g-new", "gate", ["VAL-001"], depends_on=["v-new"]),
+            ]
+        )
+        coordinator = MissionCoordinator.__new__(MissionCoordinator)
+
+        assert coordinator._upstream_validators(task_list, "g-new") == ["v-new"]
+
+        branched = TaskList(
+            tasks=[
+                _task("w-old", "work", ["VAL-001"]),
+                _task("v-old", "validate", ["VAL-001"], depends_on=["w-old"]),
+                _task("w-left", "work", ["VAL-001"], depends_on=["v-old"]),
+                _task("w-right", "work", ["VAL-001"], depends_on=["v-old"]),
+                _task("v-left", "validate", ["VAL-001"], depends_on=["w-left"]),
+                _task("v-right", "validate", ["VAL-001"], depends_on=["w-right"]),
+                _task(
+                    "g-new",
+                    "gate",
+                    ["VAL-001"],
+                    depends_on=["v-left", "v-right"],
+                ),
+            ]
+        )
+        assert set(coordinator._upstream_validators(branched, "g-new")) == {
+            "v-left",
+            "v-right",
+        }
 
     def test_validator_omitting_items_fails_gate(
         self, config: HarnessConfig, workspace: Path

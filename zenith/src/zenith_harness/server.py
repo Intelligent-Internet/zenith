@@ -10,6 +10,7 @@ import asyncio
 import fcntl
 import logging
 import os
+import stat
 from typing import Annotated, Any, Callable
 
 from fastmcp import Context, FastMCP
@@ -121,7 +122,7 @@ def _run_project_locked(
     file handle closes as this function returns — spans the true wave lifetime.
     A concurrent mutating call gets ``wave_in_progress`` instead of racing.
     """
-    runtime = controller.config.zenith_runtime_dir(project_id)
+    runtime = controller.store.zenith_runtime_dir(project_id)
     try:
         runtime.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -129,7 +130,24 @@ def _run_project_locked(
         # raise its own not_found/validation ToolError rather than masking it.
         return fn(*args)
     lock_path = runtime / ".wave.lock"
-    with open(lock_path, "w") as handle:
+    fd: int | None = None
+    try:
+        fd = os.open(
+            lock_path,
+            os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+            0o600,
+        )
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("wave lock is not a regular file")
+    except OSError as exc:
+        if fd is not None:
+            os.close(fd)
+        raise ToolError(
+            "unsafe_wave_lock",
+            "the project wave lock is not a safe regular file",
+        ) from exc
+    assert fd is not None
+    with os.fdopen(fd, "r+") as handle:
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:

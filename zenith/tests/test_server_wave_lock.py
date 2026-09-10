@@ -18,6 +18,7 @@ import pytest
 from zenith_harness.config import HarnessConfig
 from zenith_harness.controller import ToolError
 from zenith_harness.server import _run_project_locked
+from zenith_harness.storage import ProjectStore
 
 PID = "proj-1"
 
@@ -37,13 +38,51 @@ def controller(harness_home: Path):
         terminal_reviewer_provider_name=None,
         terminal_reviewer_acp_command=None,
     )
-    # The helper only touches controller.config.zenith_runtime_dir(pid).
-    return types.SimpleNamespace(config=cfg)
+    return types.SimpleNamespace(config=cfg, store=ProjectStore(cfg))
 
 
 def test_runs_fn_and_returns_result(controller):
     assert _run_project_locked(controller, PID, lambda a, b: a + b, 2, 3) == 5
-    assert (controller.config.zenith_runtime_dir(PID) / ".wave.lock").exists()
+    assert (controller.store.zenith_runtime_dir(PID) / ".wave.lock").exists()
+
+
+def test_rejects_project_id_that_escapes_projects_dir(controller):
+    called = False
+
+    def operation():
+        nonlocal called
+        called = True
+
+    with pytest.raises(ValueError, match="invalid project_id"):
+        _run_project_locked(controller, "../escape", operation)
+
+    assert not called
+    assert not (controller.config.projects_dir.parent / "escape").exists()
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_rejects_symlinked_wave_lock(controller, tmp_path, dangling):
+    runtime = controller.store.zenith_runtime_dir(PID)
+    runtime.mkdir(parents=True)
+    outside = tmp_path / "outside-lock"
+    if not dangling:
+        outside.write_text("keep\n")
+    (runtime / ".wave.lock").symlink_to(outside)
+    called = False
+
+    def operation():
+        nonlocal called
+        called = True
+
+    with pytest.raises(ToolError) as exc_info:
+        _run_project_locked(controller, PID, operation)
+
+    assert exc_info.value.code == "unsafe_wave_lock"
+    assert not called
+    if dangling:
+        assert not outside.exists()
+    else:
+        assert outside.read_text() == "keep\n"
 
 
 def test_second_call_is_rejected_while_first_holds_lock(controller):
