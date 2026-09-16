@@ -16,6 +16,7 @@ keywords = [
     "agent-client-protocol",
     "claude-code",
     "codex",
+    "opencode",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

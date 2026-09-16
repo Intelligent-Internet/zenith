@@ -9,7 +9,7 @@
   <a href="technical_report/Technical_Report.pdf"><img src="https://img.shields.io/badge/technical%20report-PDF-b31b1b.svg" alt="Technical Report"></a>
 </p>
 
-Zenith is an agent harness for work that may run for days or weeks, where the dominant failure mode is *premature completion* rather than inability to make progress. It runs a coding agent (Claude Code, Codex, or Hermes) as a multi-agent orchestrator over MCP/ACP: one orchestrator session reads task state each turn and decides whether to spawn workers and testers, register reusable skills, replan, or stop.
+Zenith is an agent harness for work that may run for days or weeks, where the dominant failure mode is *premature completion* rather than inability to make progress. It runs a coding agent (Claude Code, Codex, Hermes, or experimental OpenCode support) as a multi-agent orchestrator over MCP/ACP: one orchestrator session reads task state each turn and decides whether to spawn workers and testers, register reusable skills, replan, or stop.
 
 This repository contains the Zenith harness ([`zenith/`](zenith/)) and the Intelligent Internet technical report (2026) behind it.
 
@@ -29,10 +29,10 @@ Our Zenith method keeps the useful parts of repeated review while making the loo
 
 ### Option 1 — Let your agent install it
 
-Copy this prompt into Claude Code or Codex:
+Copy this prompt into Claude Code, Codex, or OpenCode:
 
 ```text
-/goal Read the readme at https://github.com/Intelligent-Internet/zenith, detect if using Claude Code, Codex, or both, install requirements, install and run Zenith (i.e. uv run zenith, as in the readme), and create a new skill called /zenith — when used (along with an additional prompt) it will call the skill: the minimum skill content should be: """First read .claude/orchestrator_prompt.md and treat it as your primary role, then use Zenith to run this mission.""" Afterwards, you can add information about the Zenith harness, based on the readme and the technical report (inside the repo), and info on how to start Zenith if it's not already running. Change the skill to use .codex when using it in Codex. If both harnesses are available, make sure to add the skill to both of them correctly. In fact, there might be more harness options (Hermes, for example). See what is supported in zenith/src/zenith_harness/providers.py, and for those that you detect are present, add their skills correctly. When finished, confirm to me that Zenith is installed, running, and ready, explain a bit about Zenith, and why and when to use it.
+/goal Read the readme at https://github.com/Intelligent-Internet/zenith, detect if using Claude Code, Codex, OpenCode, or multiple supported agents, install requirements, install and run Zenith (i.e. uv run zenith, as in the readme), and create a new skill called /zenith — when used (along with an additional prompt) it will call the skill: the minimum skill content should be: """First read .claude/orchestrator_prompt.md and treat it as your primary role, then use Zenith to run this mission.""" Afterwards, you can add information about the Zenith harness, based on the readme and the technical report (inside the repo), and info on how to start Zenith if it's not already running. Change the skill to use .codex when using it in Codex and .opencode when using it in OpenCode. If multiple harnesses are available, make sure to add the skill to both of them correctly. In fact, there might be more harness options (Hermes, for example). See what is supported in zenith/src/zenith_harness/providers.py, and for those that you detect are present, add their skills correctly. When finished, confirm to me that Zenith is installed, running, and ready, explain a bit about Zenith, and why and when to use it.
 ```
 
 This will:
@@ -41,7 +41,7 @@ This will:
 - start Zenith using `uv`
 - create a `/zenith` skill for each agent harness it detects
 
-Then, in Claude Code or Codex, type:
+Then, in Claude Code, Codex, or OpenCode, type:
 
 ```text
 /zenith <your instruction or query>
@@ -54,7 +54,7 @@ Then, in Claude Code or Codex, type:
 - Python 3.11+
 - [`uv`](https://docs.astral.sh/uv/)
 - Node.js 22+ and `npm`
-- Claude Code, Codex, or Hermes (see [`providers.py`](zenith/src/zenith_harness/providers.py) for the supported set)
+- Claude Code, Codex, Hermes, or OpenCode (see [`providers.py`](zenith/src/zenith_harness/providers.py) for the supported set)
 
 **Install**
 
@@ -76,6 +76,21 @@ npm install -g @agentclientprotocol/codex-acp
 command -v codex-acp
 ```
 
+OpenCode has a native ACP server, so no third-party ACP adapter is required.
+Install OpenCode using the current OpenCode installation instructions for your
+platform, then confirm the `opencode` binary is on `PATH`:
+
+```bash
+# Common OpenCode 1.x install path; see https://opencode.ai/docs/ for alternatives.
+curl -fsSL https://opencode.ai/install | bash
+command -v opencode
+opencode --version
+```
+
+This PR-A OpenCode support was implemented against OpenCode `1.18.30` and uses
+the `opencode acp` command, project `.opencode` configuration, OpenCode agents,
+and OpenCode skills.
+
 **Initialize a workspace**
 
 Initialize the project workspace Zenith should operate on. This is your target app/repo, not the Zenith source checkout:
@@ -86,6 +101,9 @@ uv run zenith init --workspace-dir /path/to/your-app --agent claude
 
 # Or Codex, from this Zenith checkout
 uv run zenith init --workspace-dir /path/to/your-app --agent codex
+
+# Or OpenCode, from this Zenith checkout
+uv run zenith init --workspace-dir /path/to/your-app --agent opencode
 ```
 
 **Run a mission**
@@ -98,15 +116,54 @@ cd /path/to/your-app
 claude
 # or
 codex
+# or
+opencode
 ```
 
-Then ask the agent to read the generated orchestrator prompt (use `.codex/orchestrator_prompt.md` for Codex):
+Then ask the agent to read the generated orchestrator prompt (use `.codex/orchestrator_prompt.md` for Codex and `.opencode/orchestrator_prompt.md` for OpenCode):
 
 ```text
 First read .claude/orchestrator_prompt.md and treat it as your primary role, then use Zenith to run this mission.
 
 <your instruction or query>
 ```
+
+### OpenCode project setup
+
+`zenith init --agent opencode` performs project-scoped setup only. It writes or
+updates `.opencode/opencode.json` with Zenith's managed `mcp.zenith` local MCP
+entry, using OpenCode's `command`, `environment`, `enabled`, and millisecond
+`timeout` fields. It also creates `.opencode/orchestrator_prompt.md`, installs
+OpenCode subagents under `.opencode/agents/`, and installs bundled skills under
+both `.opencode/skills/` and `.agents/skills/`.
+
+Zenith preserves unrelated strict JSON OpenCode settings and unrelated MCP
+servers. It does not rewrite JSONC; if `.opencode/opencode.jsonc` or a project
+`opencode.jsonc` defines `mcp.zenith` in a way that would shadow Zenith's
+managed entry, initialization fails with remediation instead of normalizing the
+commented file.
+
+OpenCode PR-A support is intentionally experimental. It registers OpenCode as a
+host and execution provider, selects the native `opencode acp` command for
+worker, validator, and terminal-reviewer roles, and selects OpenCode `build`
+mode for normal ACP sessions. It does not yet claim verified live OpenCode
+worker or validator execution, per-role OpenCode model/effort session options,
+isolated OpenCode terminal review, user-scoped OpenCode setup, or
+provider-neutral billing grants. Those are future PR B/C boundaries.
+
+Zenith does not choose or persist an OpenCode default model, provider credential,
+permission policy, plugin configuration, global OpenCode config, or provider API
+key. Normal OpenCode worker and validator sessions run with the credentials
+available to the `opencode` process, so provider access and billing remain under
+the operator's OpenCode trust boundary. PR-A checks are hermetic by default and
+use disposable local OpenCode configuration checks such as `opencode debug
+config`; any live-provider smoke that can spend tokens must stay explicit and
+opt-in.
+
+For audience-specific OpenCode guidance, see the
+[user](docs/opencode-support/user.md),
+[admin](docs/opencode-support/admin.md), and
+[developer](docs/opencode-support/developer.md) guides.
 
 ## How Zenith Works
 

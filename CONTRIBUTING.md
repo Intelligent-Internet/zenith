@@ -21,7 +21,7 @@ uv run mypy src       # type-check
 uv run pytest -q      # tests
 ```
 
-A handful of smoke tests exercise real ACP agents and are skipped automatically when the corresponding binaries (`claude-agent-acp`, `codex-acp`) are not installed.
+A handful of smoke tests exercise real ACP agents and are skipped automatically when the corresponding binaries (`claude-agent-acp`, `codex-acp`, or `opencode`) are not installed. Live provider checks can spend tokens and must stay explicitly opt-in; hermetic tests plus disposable host configuration checks are the default evidence floor.
 
 ## Pull requests
 
@@ -32,7 +32,30 @@ A handful of smoke tests exercise real ACP agents and are skipped automatically 
 
 ## Adding a provider
 
-Zenith's agent providers (Claude Code, Codex, Hermes, …) are declared in [`zenith/src/zenith_harness/providers.py`](zenith/src/zenith_harness/providers.py), with per-provider assets under [`zenith/src/zenith_harness/bundled/providers/`](zenith/src/zenith_harness/bundled/providers/). New provider PRs should include an orchestrator prompt path, ACP adapter command, and tests in `tests/`.
+Zenith's agent providers (Claude Code, Codex, Hermes, OpenCode, ...) are declared in [`zenith/src/zenith_harness/providers.py`](zenith/src/zenith_harness/providers.py), with per-provider assets under [`zenith/src/zenith_harness/bundled/providers/`](zenith/src/zenith_harness/bundled/providers/). New provider PRs should include an orchestrator prompt path, ACP adapter command, and tests in `tests/`.
+
+### OpenCode PR-A boundaries
+
+OpenCode support in this branch is project-scoped and experimental. Keep docs,
+tests, and implementation aligned with `zenith init --agent opencode` generating
+`.opencode/opencode.json`, `.opencode/orchestrator_prompt.md`, `.opencode/agents/`,
+`.opencode/skills/`, and `.agents/skills/`. The managed OpenCode config should
+contain only Zenith's `mcp.zenith` local MCP entry and safe Zenith routing
+values; it must not persist provider API keys, OpenCode credentials, a default
+model/provider, permission policy, plugin configuration, global OpenCode config,
+or arbitrary provider secret environment variables.
+
+Do not claim PR A proves live OpenCode worker or validator execution, OpenCode
+model/effort ACP session options, isolated OpenCode terminal review, user-scoped
+OpenCode setup, or provider-neutral billing grants. Those belong to later PR B/C
+work. If you add future live OpenCode smoke tests, keep them opt-in and document
+that normal worker and validator sessions use the credentials available to the
+`opencode` process and therefore share the operator's billing trust boundary.
+
+Keep the audience-specific OpenCode docs in sync with code changes:
+[`docs/opencode-support/user.md`](docs/opencode-support/user.md),
+[`docs/opencode-support/admin.md`](docs/opencode-support/admin.md), and
+[`docs/opencode-support/developer.md`](docs/opencode-support/developer.md).
 
 ## License
 

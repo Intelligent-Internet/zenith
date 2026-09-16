@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 from zenith_harness.config import HarnessConfig
-from zenith_harness.providers import ProviderSelection, get_provider
+from zenith_harness.providers import (
+    ProviderSelection,
+    get_provider,
+    provider_names_for_role,
+)
 
 _PROVIDER_ENV_KEYS = (
     "ZENITH_ORCHESTRATOR_PROVIDER",
@@ -129,6 +133,91 @@ def test_discover_invalid_reasoning_effort_rejected(
 
     with pytest.raises(ValueError, match="ZENITH_VALIDATOR_REASONING_EFFORT"):
         HarnessConfig.discover()
+
+
+def test_opencode_registered_for_all_provider_roles() -> None:
+    assert "opencode" in provider_names_for_role("orchestrator")
+    assert "opencode" in provider_names_for_role("worker")
+
+    provider = get_provider("opencode")
+    assert provider.config_format == "opencode_config"
+    assert provider.default_worker_acp_command == "opencode acp"
+    assert provider.skill_dirs == (".opencode/skills", ".agents/skills")
+    assert provider.skill_alias_dirs == (".opencode/skills", ".agents/skills")
+    assert provider.agent_output_dir == ".opencode/agents"
+    assert provider.orchestrator_prompt_output_path == ".opencode/orchestrator_prompt.md"
+    assert provider.acp_supports_system_prompt is False
+    assert provider.acp_runtime_mode == "build"
+
+
+def test_opencode_default_execution_roles_resolve_to_native_acp(
+    monkeypatch,
+    harness_home: Path,
+) -> None:
+    selection = ProviderSelection(
+        orchestrator=get_provider("opencode"),
+        worker=get_provider("opencode"),
+    )
+
+    assert selection.resolved_worker_acp_command == "opencode acp"
+    assert selection.resolved_validation_worker_acp_command == "opencode acp"
+    assert selection.resolved_terminal_reviewer_acp_command == "opencode acp"
+
+    config = _apply_selection_env(monkeypatch, harness_home, selection)
+
+    assert config.orchestrator_provider.name == "opencode"
+    assert config.worker_provider.name == "opencode"
+    assert config.validator_provider.name == "opencode"
+    assert config.terminal_reviewer_provider.name == "opencode"
+    assert config.resolved_worker_acp_command == "opencode acp"
+    assert config.resolved_validator_acp_command == "opencode acp"
+    assert config.resolved_terminal_reviewer_acp_command == "opencode acp"
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "default_command"),
+    [
+        ("claude", "claude-agent-acp"),
+        ("codex", "codex-acp"),
+        ("hermes", "hermes acp"),
+        ("opencode", "opencode acp"),
+    ],
+)
+def test_same_provider_custom_command_cascades_for_registered_providers(
+    monkeypatch,
+    harness_home: Path,
+    provider_name: str,
+    default_command: str,
+) -> None:
+    custom_command = f"{default_command} --wrapped"
+    selection = ProviderSelection(
+        orchestrator=get_provider(provider_name),
+        worker=get_provider(provider_name),
+        worker_acp_command=custom_command,
+    )
+
+    config = _apply_selection_env(monkeypatch, harness_home, selection)
+
+    assert config.resolved_worker_acp_command == custom_command
+    assert config.resolved_validator_acp_command == custom_command
+    assert config.resolved_terminal_reviewer_acp_command == custom_command
+
+
+def test_provider_switch_to_opencode_uses_opencode_default_command(
+    monkeypatch,
+    harness_home: Path,
+) -> None:
+    selection = ProviderSelection(
+        orchestrator=get_provider("claude"),
+        worker=get_provider("claude"),
+        worker_acp_command="claude-agent-acp --model custom",
+        validation_worker=get_provider("opencode"),
+    )
+
+    config = _apply_selection_env(monkeypatch, harness_home, selection)
+
+    assert config.resolved_validator_acp_command == "opencode acp"
+    assert config.resolved_terminal_reviewer_acp_command == "opencode acp"
 
 
 def test_for_role_reasoning_effort_cascade(

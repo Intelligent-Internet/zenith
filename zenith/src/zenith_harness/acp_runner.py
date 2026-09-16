@@ -183,6 +183,11 @@ def _acp_subprocess_env(
     """
     env = os.environ.copy()
     name = getattr(provider, "name", None)
+    if name != "codex":
+        env.pop("CODEX_SANDBOX", None)
+        env.pop("CODEX_DISABLE_SANDBOX", None)
+        return env
+
     if name == "codex":
         # Env-var hints — harmless if codex ignores them.
         env["CODEX_SANDBOX"] = "danger-full-access"
@@ -215,7 +220,6 @@ def _acp_subprocess_env(
             env["CODEX_CONFIG"] = json.dumps(codex_config, allow_nan=False)
         except (TypeError, ValueError) as exc:
             raise ACPError("Codex configuration must contain JSON-compatible values") from exc
-    # hermes: no special env needed
     return env
 
 
@@ -1332,12 +1336,16 @@ def _ensure_claude_settings(workspace: Path, provider) -> None:
     accept "auto".
 
     We touch this file only when:
-    - The provider declares a non-empty `acp_runtime_mode` (i.e. claude).
+    - The provider is Claude. Other providers can use `acp_runtime_mode` for
+      their own ACP session mode without inheriting Claude host paths.
+    - Claude declares a non-empty `acp_runtime_mode`.
     - The file does not already exist (respect any user-authored override).
 
     In v5 the workspace is the user's repo, so we conservatively no-op on
     pre-existing files.
     """
+    if getattr(provider, "name", None) != "claude":
+        return
     mode = getattr(provider, "acp_runtime_mode", None)
     if not mode:
         return

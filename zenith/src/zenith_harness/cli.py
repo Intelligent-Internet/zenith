@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import tempfile
 from pathlib import Path
 
 import click
@@ -144,6 +146,7 @@ def init(
         f"worker={selection.worker.name}, "
         f"validator={selection.resolved_validation_worker.name}."
     )
+    _echo_opencode_diagnostics(workspace, selection)
     click.echo(
         "Bucket lives at $ZENITH_HOME/projects/<pid>/ — created on the first "
         "`start_project(brief, workspace_dir)` call."
@@ -279,8 +282,11 @@ def _copy_skills(loader: AssetLoader, target: Path) -> None:
         return
     for skill_dir in iter_skill_directories(bundled):
         dest = target / skill_dir.name
+        dest_file = dest / "SKILL.md"
+        if dest_file.exists():
+            continue
         dest.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(skill_dir / "SKILL.md", dest / "SKILL.md")
+        shutil.copy2(skill_dir / "SKILL.md", dest_file)
 
 
 def _echo_next_steps(orchestrator: ProviderDefinition) -> None:
@@ -296,6 +302,52 @@ def _echo_next_steps(orchestrator: ProviderDefinition) -> None:
         )
         click.echo("")
         click.echo("     <your instruction or query>")
+
+
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b([A-Z0-9_]*(?:API[_-]?KEY|AUTH[_-]?TOKEN|SECRET|PASSWORD)"
+    r"[A-Z0-9_]*)=([^ \t]+)"
+)
+_SECRET_FLAG_RE = re.compile(
+    r"(?i)(--(?:api[_-]?key|auth[_-]?token|token|secret|password)(?:=|\s+))"
+    r"([^ \t]+)"
+)
+_BEARER_TOKEN_RE = re.compile(r"(?i)\bBearer\s+([^ \t]+)")
+
+
+def _echo_opencode_diagnostics(workspace: Path, selection: ProviderSelection) -> None:
+    if selection.orchestrator.config_format != "opencode_config":
+        return
+
+    config_path = workspace / ".opencode" / "opencode.json"
+    click.echo("OpenCode diagnostics:")
+    click.echo(f"  host: {selection.orchestrator.name} ({config_path})")
+    click.echo(
+        f"  roles: orchestrator={selection.orchestrator.name}, "
+        f"worker={selection.worker.name}, "
+        f"validator={selection.resolved_validation_worker.name}, "
+        f"terminal reviewer={selection.resolved_terminal_reviewer.name}"
+    )
+    click.echo(
+        "  ACP commands: "
+        f"worker={_diagnostic_command(selection.resolved_worker_acp_command)}, "
+        f"validator={_diagnostic_command(selection.resolved_validation_worker_acp_command)}, "
+        "terminal reviewer="
+        f"{_diagnostic_command(selection.resolved_terminal_reviewer_acp_command)}"
+    )
+    click.echo(
+        "  model pins: worker=absent, validator=absent, "
+        "terminal reviewer=absent "
+        "(provider defaults preserved; no default model selected)"
+    )
+
+
+def _diagnostic_command(command: str | None) -> str:
+    if command is None:
+        return "absent"
+    redacted = _SECRET_ASSIGNMENT_RE.sub(r"\1=<redacted>", command)
+    redacted = _SECRET_FLAG_RE.sub(r"\1<redacted>", redacted)
+    return _BEARER_TOKEN_RE.sub("Bearer <redacted>", redacted)
 
 
 def _resolve_selection(
@@ -381,7 +433,10 @@ def _write_bootstrap_config(
     cli_env: dict[str, str],
 ) -> None:
     fmt = selection.orchestrator.config_format
-    env = {**selection.env(), **storage_env, **_forwarded_runtime_env(), **cli_env}
+    env = {**selection.env(), **storage_env}
+    if fmt != "opencode_config":
+        env.update(_forwarded_runtime_env())
+    env.update(cli_env)
     server_args = _mcp_server_args()
     if fmt == "mcp_json":
         path = workspace / ".mcp.json"
@@ -423,8 +478,222 @@ def _write_bootstrap_config(
         )
         _replace_managed_block(config_path, "# BEGIN zenith", "# END zenith", block)
         click.echo(f"Wrote {config_path}")
+    elif fmt == "opencode_config":
+        config_path = workspace / ".opencode" / "opencode.json"
+        _write_opencode_config(
+            config_path,
+            {
+                "type": "local",
+                "command": ["uv", *server_args],
+                "enabled": True,
+                "timeout": 1000000,
+                "environment": env,
+            },
+        )
+        click.echo(f"Wrote {config_path}")
     else:
         raise ValueError(f"unsupported config_format: {fmt}")
+
+
+def _write_opencode_config(path: Path, entry: dict[str, object]) -> None:
+    _fail_if_opencode_jsonc_shadows_managed_entry(path)
+    _fail_if_opencode_root_strict_json_shadows_managed_entry(path)
+
+    config: dict[str, object]
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise click.ClickException(
+                f"Cannot update {path}: expected strict JSON object"
+            ) from exc
+        if not isinstance(loaded, dict):
+            raise click.ClickException(
+                f"Cannot update {path}: expected strict JSON object"
+            )
+        config = loaded
+    else:
+        config = {"$schema": "https://opencode.ai/config.json"}
+
+    mcp_obj = config.get("mcp")
+    mcp: dict[str, object] = {}
+    if mcp_obj is None:
+        pass
+    elif isinstance(mcp_obj, dict):
+        mcp.update(mcp_obj)
+    else:
+        raise click.ClickException(f"Cannot update {path}: mcp must be an object")
+    mcp["zenith"] = entry
+    config["mcp"] = mcp
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    updated = json.dumps(config, indent=2) + "\n"
+    if path.exists() and path.read_text(encoding="utf-8") == updated:
+        return
+
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+            tmp.write(updated)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
+def _fail_if_opencode_jsonc_shadows_managed_entry(path: Path) -> None:
+    for jsonc_path in _opencode_jsonc_paths(path):
+        if not jsonc_path.exists():
+            continue
+        if _jsonc_defines_mcp_zenith(jsonc_path):
+            raise click.ClickException(
+                f"Cannot update {path}: {jsonc_path} defines mcp.zenith, "
+                "which OpenCode loads after the managed JSON. "
+                "Remove that JSONC entry or move it to .opencode/opencode.json "
+                "before rerunning zenith init."
+            )
+
+
+def _opencode_jsonc_paths(path: Path) -> tuple[Path, ...]:
+    paths = [path.with_suffix(".jsonc")]
+    if path.parent.name == ".opencode":
+        paths.append(path.parent.parent / "opencode.jsonc")
+    deduped: list[Path] = []
+    for candidate in paths:
+        if candidate not in deduped:
+            deduped.append(candidate)
+    return tuple(deduped)
+
+
+def _fail_if_opencode_root_strict_json_shadows_managed_entry(path: Path) -> None:
+    if path.parent.name != ".opencode":
+        return
+    root_json_path = path.parent.parent / path.name
+    if not root_json_path.exists():
+        return
+    if _strict_json_defines_mcp_zenith(root_json_path):
+        raise click.ClickException(
+            f"Cannot update {path}: {root_json_path} defines mcp.zenith, "
+            "which OpenCode loads alongside the managed .opencode JSON and "
+            "may merge into the effective registration. Remove that root "
+            "entry, rename the user MCP server, or keep Zenith's mcp.zenith "
+            "only in .opencode/opencode.json before rerunning zenith init."
+        )
+
+
+def _strict_json_defines_mcp_zenith(path: Path) -> bool:
+    text = path.read_text(encoding="utf-8")
+    try:
+        loaded = json.loads(text)
+    except json.JSONDecodeError as exc:
+        if '"mcp"' in text and '"zenith"' in text:
+            raise click.ClickException(
+                f"Cannot verify {path}: it appears to define mcp.zenith but "
+                "is not parseable as strict JSON. Fix or remove that root "
+                "entry before rerunning zenith init."
+            ) from exc
+        return False
+    if not isinstance(loaded, dict):
+        return False
+    mcp = loaded.get("mcp")
+    return isinstance(mcp, dict) and "zenith" in mcp
+
+
+def _jsonc_defines_mcp_zenith(path: Path) -> bool:
+    text = path.read_text(encoding="utf-8")
+    without_comments = _strip_jsonc_comments(text)
+    try:
+        loaded = json.loads(_strip_jsonc_trailing_commas(without_comments))
+    except json.JSONDecodeError as exc:
+        if '"mcp"' in without_comments and '"zenith"' in without_comments:
+            raise click.ClickException(
+                f"Cannot verify {path}: it appears to define mcp.zenith but "
+                "is not parseable as JSONC. Fix or remove that JSONC entry "
+                "before rerunning zenith init."
+            ) from exc
+        return False
+    if not isinstance(loaded, dict):
+        return False
+    mcp = loaded.get("mcp")
+    return isinstance(mcp, dict) and "zenith" in mcp
+
+
+def _strip_jsonc_comments(text: str) -> str:
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            i += 2
+            while i < len(text) and text[i] not in "\r\n":
+                i += 1
+            continue
+        if ch == "/" and nxt == "*":
+            i += 2
+            while i < len(text) - 1 and not (text[i] == "*" and text[i + 1] == "/"):
+                if text[i] in "\r\n":
+                    out.append(text[i])
+                i += 1
+            i += 2 if i < len(text) else 0
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _strip_jsonc_trailing_commas(text: str) -> str:
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == ",":
+            j = i + 1
+            while j < len(text) and text[j].isspace():
+                j += 1
+            if j < len(text) and text[j] in "}]":
+                i += 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _replace_managed_block(path: Path, start: str, end: str, block: str) -> None:

@@ -23,6 +23,7 @@ from zenith_harness.acp_runner import (
     ACPError,
     _acp_subprocess_env,
     _augment_acp_command,
+    _ensure_claude_settings,
     _parse_codex_c_overrides,
 )
 from zenith_harness.providers import PROVIDERS
@@ -173,6 +174,40 @@ def test_augment_acp_command_claude_untouched():
     assert (
         _augment_acp_command("claude-agent-acp", PROVIDERS["claude"], reasoning_effort="low")
         == "claude-agent-acp"
+    )
+
+
+def test_claude_settings_workaround_is_scoped_to_claude(tmp_path: Path):
+    opencode_workspace = tmp_path / "opencode"
+    opencode_workspace.mkdir()
+
+    assert PROVIDERS["opencode"].acp_runtime_mode == "build"
+    _ensure_claude_settings(opencode_workspace, PROVIDERS["opencode"])
+    assert not (opencode_workspace / ".claude" / "settings.json").exists()
+
+    existing_settings = opencode_workspace / ".claude" / "settings.json"
+    existing_settings.parent.mkdir(parents=True)
+    existing_settings.write_text('{"user": "keep-me"}\n', encoding="utf-8")
+    _ensure_claude_settings(opencode_workspace, PROVIDERS["opencode"])
+    assert existing_settings.read_text(encoding="utf-8") == '{"user": "keep-me"}\n'
+
+    claude_workspace = tmp_path / "claude"
+    claude_workspace.mkdir()
+    _ensure_claude_settings(claude_workspace, PROVIDERS["claude"])
+    assert json.loads(
+        (claude_workspace / ".claude" / "settings.json").read_text(encoding="utf-8")
+    ) == {"permissions": {"defaultMode": "bypassPermissions"}}
+
+
+@pytest.mark.asyncio
+async def test_opencode_build_mode_still_uses_session_set_mode(config: HarnessConfig):
+    runner = ACPNodeRunner(config=config, loader=AssetLoader(config))
+    client = AsyncMock()
+
+    await runner._maybe_set_mode(client, "session-1", PROVIDERS["opencode"])
+
+    client.send_request.assert_awaited_once_with(
+        "session/set_mode", {"sessionId": "session-1", "modeId": "build"}
     )
 
 

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from zenith_harness.assets import AssetLoader, parse_frontmatter
+from zenith_harness.assets import AssetLoader, iter_skill_directories, parse_frontmatter
 from zenith_harness.config import HarnessConfig
 from zenith_harness.models import ASSERTION_ID_REGEX
 
@@ -34,6 +34,9 @@ def loader(config: HarnessConfig) -> AssetLoader:
 
 
 class TestSkillResolution:
+    def test_missing_skill_directory_lists_empty(self, tmp_path: Path) -> None:
+        assert iter_skill_directories(tmp_path / "missing") == []
+
     @pytest.mark.parametrize(
         "skill_name", ["scrutiny-validator", "engineering-mission-playbook"]
     )
@@ -73,6 +76,45 @@ class TestSkillResolution:
         assert s.source == "project"
         assert "Project body" in s.body
 
+    def test_load_skill_missing_raises(self, loader: AssetLoader) -> None:
+        with pytest.raises(FileNotFoundError, match="Skill not found: no-such-skill"):
+            loader.load_skill("no-such-skill")
+
+    def test_list_skills_prefers_project_then_personal_then_bundled(
+        self,
+        loader: AssetLoader,
+        config: HarnessConfig,
+    ) -> None:
+        project_skill = config.zenith_dir("p-list") / "skills" / "project" / "SKILL.md"
+        project_skill.parent.mkdir(parents=True, exist_ok=True)
+        project_skill.write_text(
+            "---\n"
+            "name: shared-skill\n"
+            "description: project copy wins\n"
+            "---\n\n"
+            "Project body.\n",
+            encoding="utf-8",
+        )
+        personal_skill = config.harness_home / "skills" / "personal" / "SKILL.md"
+        personal_skill.parent.mkdir(parents=True, exist_ok=True)
+        personal_skill.write_text(
+            "---\n"
+            "name: shared-skill\n"
+            "description: personal copy loses\n"
+            "---\n\n"
+            "Personal body.\n",
+            encoding="utf-8",
+        )
+
+        with_project = loader.list_skills(project_id="p-list")
+        without_project = loader.list_skills()
+
+        shared = [skill for skill in with_project if skill.name == "shared-skill"]
+        assert len(shared) == 1
+        assert shared[0].source == "project"
+        assert shared[0].description == "project copy wins"
+        assert all(skill.source != "project" for skill in without_project)
+
 
 class TestFrontmatter:
     def test_parse_with_frontmatter(self) -> None:
@@ -86,8 +128,63 @@ class TestFrontmatter:
         fm, body = parse_frontmatter(raw)
         assert fm == {} and body == raw
 
+    def test_parse_incomplete_frontmatter_as_body(self) -> None:
+        raw = "---\nname: x\nbody without closing delimiter\n"
+        fm, body = parse_frontmatter(raw)
+        assert fm == {}
+        assert body == raw
+
+    def test_parse_non_mapping_frontmatter_as_empty(self) -> None:
+        raw = "---\n- not\n- a\n- mapping\n---\nbody here\n"
+        fm, body = parse_frontmatter(raw)
+        assert fm == {}
+        assert body == "body here\n"
+
+
+class TestPrompts:
+    def test_missing_prompt_file_raises(self, loader: AssetLoader) -> None:
+        with pytest.raises(FileNotFoundError, match="Prompt file not found"):
+            loader.load_prompt_file("worker", "missing.md")
+
+
+class TestOpenCodeBundledAgents:
+    def test_opencode_subagents_use_markdown_frontmatter(self) -> None:
+        agents_dir = BUNDLED_DIR / "providers" / "opencode" / "agents"
+        for agent_name in OPENCODE_AGENT_NAMES:
+            path = agents_dir / f"{agent_name}.md"
+            assert path.exists(), f"missing bundled OpenCode agent: {agent_name}"
+
+            frontmatter, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+            permission = frontmatter.get("permission")
+
+            assert frontmatter["description"]
+            assert frontmatter["mode"] == "subagent"
+            assert "model" not in frontmatter
+            assert isinstance(permission, dict)
+            assert permission["edit"] == "deny"
+            assert permission["task"] == "deny"
+            assert body.lstrip().startswith("#")
+
+    def test_opencode_subagent_bodies_preserve_role_intent(self) -> None:
+        opencode_dir = BUNDLED_DIR / "providers" / "opencode" / "agents"
+        claude_dir = BUNDLED_DIR / "providers" / "claude" / "agents"
+        for agent_name in OPENCODE_AGENT_NAMES:
+            _, opencode_body = parse_frontmatter(
+                (opencode_dir / f"{agent_name}.md").read_text(encoding="utf-8")
+            )
+            _, claude_body = parse_frontmatter(
+                (claude_dir / f"{agent_name}.md").read_text(encoding="utf-8")
+            )
+            assert opencode_body == claude_body
+
 
 BUNDLED_DIR = Path(__file__).resolve().parents[1] / "src" / "zenith_harness" / "bundled"
+OPENCODE_AGENT_NAMES = (
+    "contract-review",
+    "feature-reviewer",
+    "flow-validator",
+    "investigator",
+)
 
 
 def _bundled_md_files() -> list[Path]:
