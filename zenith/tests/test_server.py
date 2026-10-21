@@ -62,6 +62,7 @@ async def test_orchestrator_tools_registered(config: HarnessConfig) -> None:
     assert names == {
         "start_project",
         "submit_plan",
+        "bind_task_placeholders",
         "advance_project",
         "end_mission",
         "decide_attention",
@@ -80,6 +81,62 @@ async def test_worker_tool_isolated() -> None:
 async def test_terminal_reviewer_tool_isolated() -> None:
     server = create_terminal_reviewer_server()
     assert await _tool_names(server) == {"submit_terminal_review"}
+
+
+@pytest.mark.asyncio
+async def test_bind_task_placeholders_is_orchestrator_only(
+    config: HarnessConfig, workspace: Path
+) -> None:
+    controller = ProjectController(
+        config,
+        MockDispatcher(
+            lambda request: WorkHandoff(node_id=request.task.id, done=True, report="unused")
+        ),
+        MockTerminalReviewer(TerminalReviewHandoff(done=True, report="")),
+    )
+    orchestrator = create_orchestrator_server(config, controller)
+
+    await orchestrator.call_tool(
+        "start_project",
+        {"brief": "Bind a receipt.", "workspace_dir": str(workspace)},
+    )
+    project_id = ProjectStore(config).list_projects()[0].id
+    contract_dir = controller.store.ensure_contract_dir(project_id, "mission-001")
+    (contract_dir / "VAL-001.md").write_text("# VAL-001\n")
+    await orchestrator.call_tool(
+        "submit_plan",
+        {
+            "project_id": project_id,
+            "task_list": {
+                "tasks": [
+                    {
+                        "id": "w1",
+                        "type": "work",
+                        "body": "consume {{RECEIPT}}",
+                        "targets": ["VAL-001"],
+                        "skill": "worker",
+                        "depends_on": [],
+                    }
+                ]
+            },
+        },
+    )
+
+    await orchestrator.call_tool(
+        "bind_task_placeholders",
+        {
+            "project_id": project_id,
+            "task_id": "w1",
+            "bindings": {"{{RECEIPT}}": "receipt.json"},
+        },
+    )
+
+    task = controller.store.load_task_list(project_id, "mission-001").tasks[0]
+    assert task.body == "consume receipt.json"
+    assert "bind_task_placeholders" not in await _tool_names(create_worker_server())
+    assert "bind_task_placeholders" not in await _tool_names(
+        create_terminal_reviewer_server()
+    )
 
 
 # ---------------------------------------------------------------------------

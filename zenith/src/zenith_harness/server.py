@@ -39,7 +39,7 @@ def create_orchestrator_server(
     config: HarnessConfig,
     controller: ProjectController | None = None,
 ) -> FastMCP:
-    """7 orchestrator tools, registered on a stdio MCP server."""
+    """8 orchestrator tools, registered on a stdio MCP server."""
     if controller is None:
         from .dispatcher import MockDispatcher, MockTerminalReviewer
 
@@ -55,9 +55,10 @@ def create_orchestrator_server(
         name="zenith",
         instructions=(
             "Mission orchestration harness. Mode: orchestrator. "
-            "7 tools: start_project, submit_plan, advance_project, "
+            "8 tools: start_project, submit_plan, bind_task_placeholders, advance_project, "
             "end_mission, decide_attention, inspect_project, abort_project. "
-            "Lifecycle: plan with submit_plan, run with advance_project, "
+            "Lifecycle: plan with submit_plan, optionally bind post-submit task placeholders "
+            "once before dispatch, then run with advance_project, "
             "request closure with end_mission, resolve attention with decide_attention, "
             "then call advance_project again."
         ),
@@ -167,6 +168,43 @@ def _register_orchestrator_tools(mcp: FastMCP, controller: ProjectController) ->
             try:
                 return _to_payload(
                     await asyncio.to_thread(controller.submit_plan, project_id, task_list)
+                )
+            except ToolError as exc:
+                return _to_payload(exc)
+
+    @mcp.tool(
+        name="bind_task_placeholders",
+        description=(
+            "One-shot orchestrator-only post-submit/pre-dispatch binding. Valid only "
+            "in mission_running before any task attempt. Bind exactly one task's "
+            "explicit placeholder-to-replacement mapping; each placeholder must "
+            "occur exactly once. Revalidates and durably persists the task list "
+            "without dispatching, syncing the workspace, or changing task/contract "
+            "state. Call at most once per mission, before advance_project."
+        ),
+    )
+    async def bind_task_placeholders(
+        project_id: Annotated[str, Field(description="Project id.")],
+        task_id: Annotated[str, Field(description="The one task whose body is bound.")],
+        bindings: Annotated[
+            dict[str, str],
+            Field(
+                description=(
+                    "Explicit placeholder-to-replacement strings. Every placeholder "
+                    "must occur exactly once in the selected task body."
+                )
+            ),
+        ],
+    ) -> dict[str, Any]:
+        async with await _project_lock(project_id):
+            try:
+                return _to_payload(
+                    await asyncio.to_thread(
+                        controller.bind_task_placeholders,
+                        project_id,
+                        task_id,
+                        bindings,
+                    )
                 )
             except ToolError as exc:
                 return _to_payload(exc)

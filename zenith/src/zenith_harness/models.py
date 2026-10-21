@@ -14,9 +14,10 @@ Attempt filenames keep the `<ts>__<node_id>.json` token for on-disk continuity
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # ---------------------------------------------------------------------------
 # Identifier conventions
@@ -386,6 +387,57 @@ class TaskStateFile(BaseModel):
         entry.last_attempt = spawn_ts
 
 
+class TaskPlaceholderBindingAudit(BaseModel):
+    """Internal one-shot audit embedded in the atomic tasks.json object."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1] = 1
+    task_id: str
+    before_task_list_sha256: str
+    after_task_list_sha256: str
+    # Placeholder name -> SHA-256 of the replacement; values are never stored.
+    bindings: dict[str, str]
+    bound_at: str
+
+    @field_validator("task_id")
+    @classmethod
+    def require_task_id(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("task_id must not be empty")
+        return value
+
+    @field_validator("before_task_list_sha256", "after_task_list_sha256")
+    @classmethod
+    def require_sha256(cls, value: str) -> str:
+        if not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("digest must be 64 lowercase hexadecimal characters")
+        return value
+
+    @field_validator("bindings")
+    @classmethod
+    def require_binding_metadata(cls, value: dict[str, str]) -> dict[str, str]:
+        if not value:
+            raise ValueError("bindings must not be empty")
+        if any(not placeholder.strip() for placeholder in value):
+            raise ValueError("placeholder names must not be empty")
+        for digest in value.values():
+            if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("replacement digest must be 64 lowercase hexadecimal characters")
+        return value
+
+    @field_validator("bound_at")
+    @classmethod
+    def require_timestamp(cls, value: str) -> str:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("bound_at must be an ISO-8601 timestamp") from exc
+        if parsed.tzinfo is None:
+            raise ValueError("bound_at must include a UTC offset")
+        return value
+
+
 class ContractStateEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -464,6 +516,7 @@ __all__ = [
     "TerminalReviewHandoff",
     "TaskStateEntry",
     "TaskStateFile",
+    "TaskPlaceholderBindingAudit",
     "ContractStateEntry",
     "ContractStateFile",
     "ProjectRecord",
