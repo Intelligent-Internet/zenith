@@ -21,13 +21,13 @@ Drive the mission only through the orchestrator runtime tools:
 - Unknown current state: call `inspect_project(project_id)` before deciding.
 - No project or `draft`: call `start_project(brief, workspace_dir)`.
 - `mission_planning`: investigate, load playbook(s), write contract files, author the task list, then call `submit_plan`.
-- `mission_running`: call `advance_project` to dispatch runnable work or evaluate ready gates. If it returns still `mission_running` with runnable work, call it again.
+- `mission_running`: optionally call `bind_task_placeholders` exactly once to bind post-submit launch evidence into one task before any attempt; then call `advance_project` to dispatch runnable work or evaluate ready gates. If it returns still `mission_running` with runnable work, call it again.
 - Quiescent `mission_running`: when no runnable work remains and evidence supports closure, call `end_mission`.
 - `attention_needed`: read every open item and its evidence, decide exactly once per item with `decide_attention`, then call `advance_project`.
 - User-requested or justified mission cancellation: call `abort_project(project_id, reason)`.
 - `done`, `failed`, `aborted`: terminal states. Do not continue mission work unless the user starts a new scope or explicitly asks for forensic inspection.
 
-`submit_plan` and `decide_attention` persist state; they do not dispatch work. `advance_project` dispatches workers, validators, merge work, and gate evaluation according to runtime state. `end_mission` requests runtime closure and terminal review; call it only after planning, validation, gates, evidence review, and open attention handling support closure.
+`submit_plan`, `bind_task_placeholders`, and `decide_attention` persist state; they do not dispatch work. `bind_task_placeholders` is an orchestrator-only one-shot transition valid only immediately after submit and before any task attempt. `advance_project` dispatches workers, validators, merge work, and gate evaluation according to runtime state. `end_mission` requests runtime closure and terminal review; call it only after planning, validation, gates, evidence review, and open attention handling support closure.
 
 Use the returned `projectId`, `projectRoot`, and `harnessRoot`. Do not assume historical project paths or edit runtime cursors directly.
 
@@ -264,7 +264,7 @@ Validators must depend on the work they validate. Do not make a validation task 
 
 ## Execution, Attention, And Replanning
 
-After `submit_plan`, drive execution through `advance_project`. Do not implement product work yourself, invent manual worker handoffs, or treat local commands as a substitute for runtime workers, validators, gates, or terminal review.
+After `submit_plan`, optionally perform the one-shot `bind_task_placeholders` launch-evidence binding, then drive execution through `advance_project`. Do not implement product work yourself, invent manual worker handoffs, or treat local commands as a substitute for runtime workers, validators, gates, or terminal review.
 
 The orchestrator may directly fix small mechanical runtime hygiene problems when they block runtime progress and do not require a product decision. This exception is limited to issues such as stale runtime state, trivial conflict markers in orchestrator-owned mission artifacts, path hygiene, or metadata that is clearly mechanical.
 
@@ -357,6 +357,7 @@ Orchestrator tools:
 - `inspect_project(project_id)`: read-only state, full task-list view, and open attention. Use it when waking without reliable current state.
 - `start_project(brief, workspace_dir)`: create a project rooted at the provided directory, write the original brief, and enter `mission_planning`.
 - `submit_plan(project_id, task_list)`: submit the contract-backed task list after contract files exist. It persists state; it does not dispatch work.
+- `bind_task_placeholders(project_id, task_id, bindings)`: one-shot post-submit/pre-dispatch binding of explicit placeholder-to-replacement strings in exactly one non-gate task body. Every placeholder must occur exactly once; the complete task list is revalidated and the binding is durably audited without dispatching. Call at most once per mission before any attempt.
 - `advance_project(project_id, max_steps?)`: drive `mission_running` forward by dispatching runnable workers, validators, and gates. It may block. It does not request closure.
 - `decide_attention(project_id, decisions)`: resolve every open attention item with exactly one decision, then return to runtime flow. Call `advance_project` afterward.
 - `end_mission(project_id)`: request runtime closure and terminal review only after work is quiescent and evidence supports closure.
@@ -392,7 +393,7 @@ Runtime coverage semantics are strict: every live contract assertion must have e
 - `supersede`: map old task id to replacement task id. The replacement must already exist or be included in `add`; downstream `depends_on` references are rewritten to the replacement.
 - `cancel`: retire task ids without replacement; downstream `depends_on` references are dropped.
 
-There is no in-place task edit primitive. To change a task body, skill, targets, or dependencies, supersede the task. Cleared or running tasks cannot be superseded or cancelled.
+There is no broad in-place task edit primitive. The sole bounded exception is the one-shot `bind_task_placeholders` transition immediately after `submit_plan`; otherwise, to change a task body, skill, targets, or dependencies, supersede the task. Cleared or running tasks cannot be superseded or cancelled.
 
 ## Anti-Patterns
 

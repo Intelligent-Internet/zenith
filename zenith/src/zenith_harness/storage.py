@@ -15,13 +15,17 @@ See `specs/memory_v2/PRODUCT.md` and `specs/task_list/PRODUCT.md`.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Iterator
 
 from .config import HarnessConfig
 from .models import (
@@ -32,6 +36,7 @@ from .models import (
     ProjectRecord,
     ProjectState,
     TaskList,
+    TaskPlaceholderBindingAudit,
     TaskStateFile,
     TerminalReviewHandoff,
     ValidateHandoff,
@@ -65,14 +70,71 @@ def atomic_write_text(path: str | Path, content: str) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = target.with_suffix(target.suffix + ".tmp")
-    tmp_path.write_text(content, encoding="utf-8")
-    os.replace(tmp_path, target)
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        os.replace(tmp_path, target)
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def atomic_write_json(path: str | Path, payload: object) -> None:
     atomic_write_text(
         path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     )
+
+
+def task_list_digest(task_list: TaskList) -> str:
+    """Return a stable SHA-256 digest of a canonical task-list payload."""
+    canonical = json.dumps(
+        task_list.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@contextmanager
+def _advisory_file_lock(path: Path) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as stream:
+        if os.name == "nt":
+            import msvcrt
+
+            locking = getattr(msvcrt, "locking")
+            lock_nonblocking = getattr(msvcrt, "LK_NBLCK")
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() == 0:
+                stream.write(b"\0")
+                stream.flush()
+            stream.seek(0)
+            while True:
+                try:
+                    locking(stream.fileno(), lock_nonblocking, 1)
+                    break
+                except OSError:
+                    time.sleep(0.05)
+        else:
+            import fcntl
+
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                import msvcrt
+
+                locking = getattr(msvcrt, "locking")
+                lock_unlock = getattr(msvcrt, "LK_UNLCK")
+                stream.seek(0)
+                locking(stream.fileno(), lock_unlock, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def attempt_to_markdown(handoff: WorkHandoff | ValidateHandoff) -> str:
@@ -156,6 +218,15 @@ class ProjectStore:
         """Cursor per-mission dir (tasks.json, task-state.json, contract-state.json,
         attempts/*.json)."""
         return self.zenith_runtime_dir(project_id) / "missions" / mission_id
+
+    def project_lock_path(self, project_id: str) -> Path:
+        return self.zenith_runtime_dir(project_id) / "controller.lock"
+
+    @contextmanager
+    def project_lock(self, project_id: str) -> Iterator[None]:
+        """Acquire the per-project advisory lock for the full controller operation."""
+        with _advisory_file_lock(self.project_lock_path(project_id)):
+            yield
 
     # ------------------------------------------------------------------
     # Project lifecycle
@@ -311,17 +382,86 @@ class ProjectStore:
             return []
         return sorted(p.name for p in d.iterdir() if p.is_dir())
 
-    def load_task_list(self, project_id: str, mission_id: str) -> TaskList:
-        path = self.mission_runtime_dir(project_id, mission_id) / "tasks.json"
+    def task_list_path(self, project_id: str, mission_id: str) -> Path:
+        return self.mission_runtime_dir(project_id, mission_id) / "tasks.json"
+
+    def _load_task_file(
+        self, project_id: str, mission_id: str
+    ) -> tuple[TaskList, TaskPlaceholderBindingAudit | None]:
+        path = self.task_list_path(project_id, mission_id)
         if not path.exists():
             raise FileNotFoundError(f"tasks.json missing for {project_id}/{mission_id}")
-        return TaskList.model_validate_json(path.read_text(encoding="utf-8"))
-
-    def save_task_list(self, project_id: str, mission_id: str, tl: TaskList) -> None:
-        atomic_write_json(
-            self.mission_runtime_dir(project_id, mission_id) / "tasks.json",
-            tl.model_dump(mode="json"),
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("tasks.json must contain an object")
+        public = dict(raw)
+        audit_raw = public.pop("_binding_audit", None)
+        audit = (
+            None
+            if audit_raw is None
+            else TaskPlaceholderBindingAudit.model_validate(audit_raw)
         )
+        return TaskList.model_validate(public), audit
+
+    def load_task_list(self, project_id: str, mission_id: str) -> TaskList:
+        task_list, _ = self._load_task_file(project_id, mission_id)
+        return task_list
+
+    def _write_task_file(
+        self,
+        project_id: str,
+        mission_id: str,
+        task_list: TaskList,
+        audit: TaskPlaceholderBindingAudit | None,
+    ) -> None:
+        payload = task_list.model_dump(mode="json")
+        if audit is not None:
+            payload["_binding_audit"] = audit.model_dump(mode="json")
+        atomic_write_json(
+            self.task_list_path(project_id, mission_id),
+            payload,
+        )
+
+    def save_task_list(
+        self,
+        project_id: str,
+        mission_id: str,
+        tl: TaskList,
+        *,
+        preserve_binding_audit: bool = True,
+    ) -> None:
+        audit = None
+        path = self.task_list_path(project_id, mission_id)
+        if preserve_binding_audit and path.exists():
+            _, audit = self._load_task_file(project_id, mission_id)
+        self._write_task_file(project_id, mission_id, tl, audit)
+
+    def task_binding_audit_path(self, project_id: str, mission_id: str) -> Path:
+        """Compatibility accessor for the audit-bearing tasks.json file."""
+        return self.task_list_path(project_id, mission_id)
+
+    def load_task_binding_audit(
+        self, project_id: str, mission_id: str
+    ) -> TaskPlaceholderBindingAudit | None:
+        path = self.task_list_path(project_id, mission_id)
+        if not path.exists():
+            return None
+        _, audit = self._load_task_file(project_id, mission_id)
+        return audit
+
+    def save_task_list_with_binding_audit(
+        self,
+        project_id: str,
+        mission_id: str,
+        task_list: TaskList,
+        audit: TaskPlaceholderBindingAudit,
+    ) -> None:
+        """Atomically replace tasks.json with public tasks plus one audit object."""
+        validated_audit = TaskPlaceholderBindingAudit.model_validate(audit)
+        existing = self.load_task_binding_audit(project_id, mission_id)
+        if existing is not None:
+            raise FileExistsError("task placeholders already bound for this mission")
+        self._write_task_file(project_id, mission_id, task_list, validated_audit)
 
     def contract_dir(self, project_id: str, mission_id: str) -> Path:
         return self.mission_dir(project_id, mission_id) / "contract"
@@ -806,6 +946,7 @@ __all__ = [
     "slugify",
     "atomic_write_text",
     "atomic_write_json",
+    "task_list_digest",
     "attempt_to_markdown",
     "terminal_review_to_markdown",
 ]

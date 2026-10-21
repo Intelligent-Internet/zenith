@@ -1,4 +1,4 @@
-"""ProjectController — routes the 7 orchestrator MCP tools.
+"""ProjectController — routes the 8 orchestrator MCP tools.
 
 See `specs/task_list/PRODUCT.md`. The controller owns:
 - envelope construction
@@ -10,6 +10,7 @@ The coordinator is constructed per-invocation; it has no in-memory state.
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 from .config import HarnessConfig
@@ -27,11 +28,12 @@ from .models import (
     MissionPlanning,
     MissionRunning,
     ProjectState,
-    TaskList,
     TaskListPatch,
+    TaskPlaceholderBindingAudit,
+    TaskList,
     TaskStateFile,
 )
-from .storage import ProjectStore
+from .storage import ProjectStore, task_list_digest, utc_now_iso
 from .task_list_patch import apply_patch
 from .task_validation import (
     ValidationError,
@@ -105,7 +107,9 @@ class ProjectController:
                 "invalid_task_list", "task list validation failed", details=errs
             )
 
-        self.store.save_task_list(project_id, mid, task_list)
+        self.store.save_task_list(
+            project_id, mid, task_list, preserve_binding_audit=False
+        )
         task_state = TaskStateFile()
         for task in task_list.tasks:
             task_state.set_status(task.id, "pending")
@@ -117,11 +121,185 @@ class ProjectController:
         self.store.save_state(project_id, MissionRunning(mission_id=mid))
         return self._build_envelope(project_id, dag_mode="frontier")
 
+    def bind_task_placeholders(
+        self,
+        project_id: str,
+        task_id: str,
+        bindings: dict[str, str],
+    ) -> Envelope:
+        with self.store.project_lock(project_id):
+            return self._bind_task_placeholders(project_id, task_id, bindings)
+
+    def _bind_task_placeholders(
+        self,
+        project_id: str,
+        task_id: str,
+        bindings: dict[str, str],
+    ) -> Envelope:
+        """Bind one task's placeholders exactly once before any dispatch."""
+        state = self._require_state(project_id)
+        if not isinstance(state, MissionRunning):
+            raise ToolError(
+                "wrong_state",
+                f"bind_task_placeholders requires MissionRunning; got {state.state}",
+            )
+        mid = state.mission_id
+
+        try:
+            existing_audit = self.store.load_task_binding_audit(project_id, mid)
+        except Exception as exc:  # noqa: BLE001
+            raise ToolError(
+                "invalid_task_binding_audit",
+                "task binding audit is invalid",
+            ) from exc
+        if existing_audit is not None:
+            raise ToolError(
+                "task_binding_already_applied",
+                "task placeholders already bound for this mission",
+            )
+
+        task_list = self.store.load_task_list(project_id, mid)
+        task_state = self.store.load_task_state(project_id, mid)
+        task_ids = {task.id for task in task_list.tasks}
+        if set(task_state.tasks) != task_ids:
+            raise ToolError(
+                "invalid_task_state",
+                "task state must contain exactly one entry per task",
+            )
+        if any(
+            entry.status != "pending" or entry.last_attempt is not None
+            for entry in task_state.tasks.values()
+        ):
+            raise ToolError(
+                "invalid_task_state",
+                "all task states must be pending with no last_attempt",
+            )
+        if self.store.list_attempts(project_id, mid):
+            raise ToolError(
+                "attempts_exist",
+                "task binding requires no existing attempts",
+            )
+
+        task = next((candidate for candidate in task_list.tasks if candidate.id == task_id), None)
+        if task is None:
+            raise ToolError("unknown_task", f"task {task_id!r} not found")
+        if task.type == "gate":
+            raise ToolError("gate_task", f"task {task_id!r} is a gate and cannot be bound")
+
+        if not isinstance(bindings, dict) or not bindings:
+            raise ToolError("empty_bindings", "bindings must not be empty")
+        for placeholder, replacement in bindings.items():
+            if not isinstance(placeholder, str) or not isinstance(replacement, str):
+                raise ToolError(
+                    "invalid_binding",
+                    "placeholder and replacement must be strings",
+                )
+
+        spans: list[tuple[int, int, str, str]] = []
+        for placeholder in sorted(bindings):
+            replacement = bindings[placeholder]
+            if not placeholder.strip():
+                raise ToolError("empty_placeholder", "placeholder must not be empty")
+            if not replacement.strip():
+                raise ToolError("empty_replacement", "replacement must not be empty")
+            if placeholder == replacement:
+                raise ToolError(
+                    "identical_binding",
+                    "placeholder and replacement must differ",
+                )
+
+            start = task.body.find(placeholder)
+            if start < 0:
+                raise ToolError(
+                    "placeholder_missing",
+                    "placeholder must occur exactly once in task body",
+                )
+            second = task.body.find(placeholder, start + len(placeholder))
+            if second >= 0:
+                raise ToolError(
+                    "ambiguous_placeholder",
+                    "placeholder occurs more than once in task body",
+                )
+            spans.append((start, start + len(placeholder), placeholder, replacement))
+
+        spans.sort(key=lambda span: (span[0], span[1], span[2]))
+        for previous, current in zip(spans, spans[1:]):
+            if current[0] < previous[1]:
+                raise ToolError(
+                    "ambiguous_placeholder",
+                    "placeholder occurrences overlap",
+                )
+
+        body_parts: list[str] = []
+        cursor = 0
+        for start, end, _, replacement in spans:
+            body_parts.append(task.body[cursor:start])
+            body_parts.append(replacement)
+            cursor = end
+        body_parts.append(task.body[cursor:])
+        bound_task = task.model_copy(update={"body": "".join(body_parts)})
+        bound_task_list = TaskList(
+            tasks=[
+                bound_task if candidate.id == task_id else candidate
+                for candidate in task_list.tasks
+            ]
+        )
+
+        contract_ids, parse_errs = parse_contract_dir(
+            self.store.contract_dir(project_id, mid)
+        )
+        if parse_errs:
+            raise ToolError(
+                "invalid_contract_dir",
+                "contract directory invalid",
+                details=parse_errs,
+            )
+        validation_errs = validate_task_list_submission(contract_ids, bound_task_list)
+        if validation_errs:
+            raise ToolError(
+                "invalid_task_list",
+                "task list validation failed",
+                details=validation_errs,
+            )
+
+        audit = TaskPlaceholderBindingAudit(
+            task_id=task_id,
+            before_task_list_sha256=task_list_digest(task_list),
+            after_task_list_sha256=task_list_digest(bound_task_list),
+            bindings={
+                placeholder: hashlib.sha256(replacement.encode("utf-8")).hexdigest()
+                for placeholder, replacement in sorted(bindings.items())
+            },
+            bound_at=utc_now_iso(),
+        )
+        try:
+            self.store.save_task_list_with_binding_audit(
+                project_id,
+                mid,
+                bound_task_list,
+                audit,
+            )
+        except FileExistsError as exc:
+            raise ToolError(
+                "task_binding_already_applied",
+                "task placeholders already bound for this mission",
+            ) from exc
+        return self._build_envelope(project_id, dag_mode="frontier")
+
     def advance_project(
         self,
         project_id: str,
         max_steps: int | None = None,
     ) -> Envelope:
+        with self.store.project_lock(project_id):
+            return self._advance_project(project_id, max_steps)
+
+    def _advance_project(
+        self,
+        project_id: str,
+        max_steps: int | None = None,
+    ) -> Envelope:
+        self._verify_task_binding_audit(project_id)
         self.store.sync_workspace_skill_surfaces(project_id)
         coordinator = MissionCoordinator(
             self.store, project_id, self.dispatcher, self.terminal_reviewer
@@ -138,12 +316,17 @@ class ProjectController:
         return self._build_envelope(project_id, dag_mode="frontier")
 
     def end_mission(self, project_id: str) -> Envelope:
+        with self.store.project_lock(project_id):
+            return self._end_mission(project_id)
+
+    def _end_mission(self, project_id: str) -> Envelope:
         state = self._require_state(project_id)
         if not isinstance(state, MissionRunning):
             raise ToolError(
                 "wrong_state",
                 f"end_mission requires MissionRunning; got {state.state}",
             )
+        self._verify_task_binding_audit(project_id)
         coordinator = MissionCoordinator(
             self.store, project_id, self.dispatcher, self.terminal_reviewer
         )
@@ -404,6 +587,54 @@ class ProjectController:
         if state is None:
             raise ToolError("not_found", f"project {project_id!r} has no state")
         return state
+
+    def _verify_task_binding_audit(self, project_id: str) -> None:
+        """Block runtime execution when a one-shot claim is inconsistent."""
+        record = self.store.load_project(project_id)
+        state = self.store.load_state(project_id)
+        mid = self._current_mission_id(record, state)
+        if mid is None:
+            return
+        try:
+            audit = self.store.load_task_binding_audit(project_id, mid)
+        except Exception as exc:  # noqa: BLE001
+            raise ToolError(
+                "invalid_task_binding_audit",
+                "task binding audit is invalid",
+            ) from exc
+        if audit is None:
+            return
+        try:
+            task_list = self.store.load_task_list(project_id, mid)
+            current_digest = task_list_digest(task_list)
+            task_state = self.store.load_task_state(project_id, mid)
+            attempts = self.store.list_attempts(project_id, mid)
+        except Exception as exc:  # noqa: BLE001
+            raise ToolError(
+                "invalid_task_binding_audit",
+                "task binding audit is invalid",
+            ) from exc
+        task_ids = {task.id for task in task_list.tasks}
+        if attempts:
+            return
+        if set(task_state.tasks) != task_ids:
+            raise ToolError(
+                "invalid_task_state",
+                "task state must contain exactly one entry per task",
+            )
+        if any(
+            entry.status != "pending" or entry.last_attempt is not None
+            for entry in task_state.tasks.values()
+        ):
+            raise ToolError(
+                "invalid_task_state",
+                "all task states must be pending with no last_attempt",
+            )
+        if current_digest != audit.after_task_list_sha256:
+            raise ToolError(
+                "task_binding_digest_mismatch",
+                "task binding audit does not match current task list",
+            )
 
 
 def _make_pending():
